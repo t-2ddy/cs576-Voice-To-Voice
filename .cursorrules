@@ -1,0 +1,46 @@
+# Project: Local AI VTuber Companion
+
+## Goal
+An AI VTuber companion with a local LLM for chat generation, ElevenLabs for TTS, and Warudo for the 3D avatar/lipsync rendering.
+
+## Stack decisions (already made, do not re-litigate unless there's a real problem)
+- **Chat generation**: local LLM via Ollama (OpenAI-compatible API at `http://localhost:11434`), model `llama3.1` for now
+- **TTS**: ElevenLabs API (REST `text-to-speech` endpoint initially; streaming websocket endpoint is the planned upgrade once the basic pipeline works)
+- **Avatar/rendering**: Warudo, using its built-in audio-based lipsync node
+- **Bridge**: custom orchestrator server (Python) that Warudo connects to via WebSocket. This was chosen over a simpler folder-watch approach specifically because the connection needs to carry more than just audio later (expressions, status, interrupts, eventual STT).
+
+## Architecture
+[Text/Voice input] → orchestrator.py → Ollama (local LLM) → text reply
+↓
+ElevenLabs TTS API → audio bytes
+↓
+WebSocket broadcast (localhost:8765)
+↓
+WarudoBridgeAsset.cs (Playground asset)
+↓
+Warudo's Generate Lip Sync Animation node
+
+## Message protocol (WebSocket, JSON)
+```json
+{"type": "audio", "format": "mp3", "data": "<base64>"}
+{"type": "expression", "value": "smile"}
+{"type": "status", "value": "speaking"}
+```
+Every future feature should be a new `type` value, not a new connection or transport.
+
+## Files that exist so far
+- `orchestrator.py` — Python WebSocket server. Handles Ollama call, ElevenLabs call, broadcasts audio to connected clients. Currently takes input via terminal `input()` as a placeholder for real STT.
+- `WarudoBridgeAsset.cs` — Warudo Playground Asset skeleton. Opens a WebSocketSharp client to `ws://localhost:8765`, decodes incoming base64 audio to a temp file, and is meant to fire a `[Trigger]` that feeds Warudo's built-in lipsync node via a `[DataOutput]` audio path.
+
+## Known unresolved items / caveats
+- The exact method for triggering a node function from an Asset and loading a file path into an `AudioClip` for Warudo's lipsync node has **not been verified against the real Warudo SDK** — needs checking against `ExampleNode.cs` and `GetRandomSoundNode.cs` from Warudo's official SDK examples (`WarudoPluginExamples` repo, HakuyaLabs on GitHub) before treating it as correct.
+- The lipsync node wiring inside the Warudo blueprint editor itself has not been done yet — this is the next concrete step.
+- ElevenLabs streaming websocket endpoint has not been integrated yet; current version waits for the full audio clip.
+- STT for voice input has not been built; text input is stubbed via terminal for testing.
+
+## Environment notes
+- Local GPU: RTX 5070 Ti, 16GB VRAM, used for local LLM inference via Ollama
+- Windows desktop, so Warudo runs natively there (Warudo is Windows-only via Unity)
+
+## Immediate next step
+Wire `WarudoBridgeAsset`'s trigger/output into Warudo's built-in "Generate Lip Sync Animation" node inside the blueprint editor, and verify the Asset API calls against the official SDK examples before assuming they're correct.
