@@ -9,10 +9,11 @@ alwaysApply: true
 An AI VTuber companion with a local LLM for chat generation, ElevenLabs for TTS, and Warudo for the 3D avatar/lipsync rendering.
 
 ## Stack decisions (already made, do not re-litigate unless there's a real problem)
-- **Chat generation**: local LLM via Ollama (OpenAI-compatible API at `http://localhost:11434`), model `hf.co/mradermacher/Gemma-2-9B-Uncensored-GGUF:Q5_K_M`
+- **Chat generation**: local LLM via Ollama (OpenAI-compatible API at `http://localhost:11434`), model `hf.co/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive:Q6_K` (switched from the 9B Gemma model — the 9B model alone used ~10GB/16GB VRAM, leaving too little headroom for faster-whisper's CUDA/cuBLAS init alongside it; under investigation as the cause of intermittent `cublas64_12.dll is not found or cannot be loaded` crashes in `voice_chat.py`)
 - **TTS**: ElevenLabs API (REST `text-to-speech` endpoint initially; streaming websocket endpoint is the planned upgrade once the basic pipeline works)
 - **Avatar/rendering**: Warudo, using its built-in audio-based lipsync node
 - **Bridge**: custom orchestrator server (Python) that Warudo connects to via WebSocket. This was chosen over a simpler folder-watch approach specifically because the connection needs to carry more than just audio later (expressions, status, interrupts, eventual STT).
+- **STT**: `faster-whisper`, model `large-v3-turbo`, `device="cuda"`, `compute_type="float16"`. Turn-taking (deciding when an utterance starts/stops) is handled by a simple RMS energy-threshold VAD rather than a native VAD library — `webrtcvad` has no Python 3.14 wheels and is unmaintained, so a dependency-free heuristic was chosen instead.
 
 ## Architecture
 [Text/Voice input] → orchestrator.py → Ollama (local LLM) → text reply
@@ -37,7 +38,7 @@ Every future feature should be a new `type` value, not a new connection or trans
 - The exact method for triggering a node function from an Asset and loading a file path into an `AudioClip` for Warudo's lipsync node has **not been verified against the real Warudo SDK** — needs checking against `ExampleNode.cs` and `GetRandomSoundNode.cs` from Warudo's official SDK examples (`WarudoPluginExamples` repo, HakuyaLabs on GitHub) before treating it as correct.
 - The lipsync node wiring inside the Warudo blueprint editor itself has not been done yet — this is the next concrete step.
 - ElevenLabs streaming websocket endpoint has not been integrated yet; current version waits for the full audio clip.
-- STT for voice input has not been built; text input is stubbed via terminal for testing.
+- `voice_chat.py` is a standalone mic-to-LLM test harness (mic -> VAD -> faster-whisper -> Ollama -> terminal) — it is not yet wired into `orchestrator.py` or the WebSocket bridge.
 
 ## Environment notes
 - Local GPU: RTX 5070 Ti, 16GB VRAM, used for local LLM inference via Ollama
