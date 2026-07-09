@@ -16,16 +16,13 @@ OLLAMA_MODEL = "hf.co/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive:Q6_K"
 OLLAMA_KEEP_ALIVE = "30m"  # keep the model resident between turns instead of the 5m default
 OLLAMA_STARTUP_TIMEOUT = 30.0
 
-# Reply length is randomized per turn (both a hard token cap and a soft phrasing
-# hint) so responses don't all come out the same length. Weighted towards
-# short/medium so it still reads as "about half" the old unconstrained length
-# on average, with occasional longer rambles for variety.
+# Most turns stay short/chatty; rare longer replies for variety.
 LENGTH_PRESETS = [
-    {"num_predict": 40, "hint": "Reply in one short sentence -- quick and punchy."},
-    {"num_predict": 90, "hint": "Reply in 2-3 sentences -- your usual conversational length."},
-    {"num_predict": 160, "hint": "Feel free to ramble a bit more than usual, 4-5 sentences."},
+    {"num_predict": 35, "hint": "Reply in one short sentence, like a quick text back."},
+    {"num_predict": 70, "hint": "Reply in 1-2 short sentences -- natural conversational length."},
+    {"num_predict": 120, "hint": "You may go a little longer this turn, up to 3-4 sentences, still conversational."},
 ]
-LENGTH_WEIGHTS = [0.35, 0.45, 0.20]
+LENGTH_WEIGHTS = [0.56, 0.40, 0.04]
 
 SOUL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soul")
 

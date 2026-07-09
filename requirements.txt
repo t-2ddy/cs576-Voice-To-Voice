@@ -1,2 +1,4 @@
 faster-whisper
 sounddevice
+supabase
+python-dotenv
