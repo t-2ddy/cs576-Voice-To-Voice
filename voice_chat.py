@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import queue
+import random
 import subprocess
 import sys
 import time
@@ -85,10 +86,27 @@ OLLAMA_MODEL = "hf.co/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive:Q6_K"
 OLLAMA_KEEP_ALIVE = "30m"  # keep the model resident between turns instead of the 5m default
 OLLAMA_STARTUP_TIMEOUT = 30.0
 
-SYSTEM_PROMPT = (
-    "You are Shiori, a helpful and friendly AI companion. "
-    "Keep replies concise and conversational."
-)
+# Reply length is randomized per turn (both a hard token cap and a soft phrasing
+# hint) so responses don't all come out the same length. Weighted towards
+# short/medium so it still reads as "about half" the old unconstrained length
+# on average, with occasional longer rambles for variety.
+LENGTH_PRESETS = [
+    {"num_predict": 40, "hint": "Reply in one short sentence -- quick and punchy."},
+    {"num_predict": 90, "hint": "Reply in 2-3 sentences -- your usual conversational length."},
+    {"num_predict": 160, "hint": "Feel free to ramble a bit more than usual, 4-5 sentences."},
+]
+LENGTH_WEIGHTS = [0.35, 0.45, 0.20]
+
+SOUL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soul")
+
+
+def load_system_prompt() -> str:
+    """Read Shiori's persona/system prompt from the `soul` file, if present."""
+    try:
+        with open(SOUL_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
 
 
 def rms(frame: np.ndarray) -> float:
@@ -209,13 +227,27 @@ def preload_model() -> None:
 
 
 def ask_ollama(history: list[dict]) -> str:
+    preset = random.choices(LENGTH_PRESETS, weights=LENGTH_WEIGHTS)[0]
+    # Qwen's chat template requires the system message to be the first message
+    # in the list (a trailing system message raises a template error), so the
+    # per-turn length hint is folded into the existing leading system message
+    # for this call only -- it is never persisted into `history`.
+    messages = list(history)
+    if messages and messages[0]["role"] == "system":
+        messages[0] = {
+            "role": "system",
+            "content": messages[0]["content"] + "\n\n" + preset["hint"],
+        }
+    else:
+        messages = [{"role": "system", "content": preset["hint"]}] + messages
     payload = json.dumps(
         {
             "model": OLLAMA_MODEL,
-            "messages": history,
+            "messages": messages,
             "stream": False,
             "keep_alive": OLLAMA_KEEP_ALIVE,
             "think": False,
+            "options": {"num_predict": preset["num_predict"]},
         }
     ).encode("utf-8")
     request = urllib.request.Request(
@@ -247,7 +279,8 @@ def main() -> None:
             print(f"(audio status: {status})", file=sys.stderr)
         frame_queue.put(indata[:, 0].copy())
 
-    history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    persona = load_system_prompt()
+    history: list[dict] = [{"role": "system", "content": persona}] if persona else []
 
     with sd.InputStream(
         samplerate=SAMPLE_RATE,
