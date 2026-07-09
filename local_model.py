@@ -18,11 +18,11 @@ OLLAMA_STARTUP_TIMEOUT = 30.0
 
 # Most turns stay short/chatty; rare longer replies for variety.
 LENGTH_PRESETS = [
-    {"num_predict": 35, "hint": "Reply in one short sentence, like a quick text back."},
-    {"num_predict": 70, "hint": "Reply in 1-2 short sentences -- natural conversational length."},
+    {"num_predict": 50, "hint": "Reply in one short sentence, like a quick text back."},
+    {"num_predict": 80, "hint": "Reply in 1-2 short sentences -- natural conversational length."},
     {"num_predict": 120, "hint": "You may go a little longer this turn, up to 3-4 sentences, still conversational."},
 ]
-LENGTH_WEIGHTS = [0.56, 0.40, 0.04]
+LENGTH_WEIGHTS = [0.66, 0.30, 0.04]
 
 SOUL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soul")
 

@@ -124,7 +124,7 @@ def record_utterance(frame_queue: queue.Queue, threshold: float) -> np.ndarray |
 
 def transcribe(model: WhisperModel, audio_int16: np.ndarray) -> str:
     audio_f32 = audio_int16.astype(np.float32) / 32768.0
-    segments, _info = model.transcribe(audio_f32, vad_filter=True)
+    segments, _info = model.transcribe(audio_f32, vad_filter=True, language="en")
     return "".join(segment.text for segment in segments).strip()
 
 

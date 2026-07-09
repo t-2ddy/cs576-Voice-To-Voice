@@ -14,7 +14,7 @@ An AI VTuber companion with a local LLM for chat generation, ElevenLabs for TTS,
 - **Avatar/rendering**: Warudo, using its built-in audio-based lipsync node
 - **Bridge**: custom orchestrator server (Python) that Warudo connects to via WebSocket. This was chosen over a simpler folder-watch approach specifically because the connection needs to carry more than just audio later (expressions, status, interrupts, eventual STT).
 - **STT**: `faster-whisper`, model `large-v3-turbo`, `device="cuda"`, `compute_type="float16"`. Turn-taking (deciding when an utterance starts/stops) is handled by a simple RMS energy-threshold VAD rather than a native VAD library — `webrtcvad` has no Python 3.14 wheels and is unmaintained, so a dependency-free heuristic was chosen instead.
-- **Chat memory (Supabase)**: four-tier schema already live — `key_facts`, `rolling_summary`, `chat_memory` (`vector(768)` + HNSW), `recent_turns`, plus RPC `match_memory`. Embeddings via local Ollama `nomic-embed-text` (768-d). API in `chat_memory.py` (`store_turn`, `build_context`, `prune_recent_turns`, etc.). Wired into `voice_chat.py`: context folded into the system message each turn, turns stored after each reply, prune every 10 assistant turns. Env: `SUPABASE_URL` (project root, no `/rest/v1`), `SUPABASE_SERVICE_ROLE_KEY`.
+- **Chat memory (Supabase)**: four-tier schema already live — `key_facts`, `rolling_summary`, `chat_memory` (`vector(768)` + HNSW), `recent_turns`, plus RPC `match_memory`. Embeddings via local Ollama `nomic-embed-text` (768-d). API in `chat_memory.py` (`store_turn`, `should_retrieve_memory`, `build_light_context` / `build_full_context`, `build_context_if_needed`, `prune_recent_turns`, etc.). Selective retrieval: heuristic gate skips semantic search on filler/chatty turns; light context = facts + summary (session-cached) + recent turns; full context adds `retrieve_relevant`. Wired into `voice_chat.py`: `build_context_if_needed` each turn (logs `(memory: light|full)`), turns stored after each reply, prune every 10 assistant turns (invalidates light cache). Env: `SUPABASE_URL` (project root, no `/rest/v1`), `SUPABASE_SERVICE_ROLE_KEY`.
 
 ## Architecture
 [Text/Voice input] → orchestrator.py → Ollama (local LLM) → text reply
@@ -40,7 +40,7 @@ Every future feature should be a new `type` value, not a new connection or trans
 - The lipsync node wiring inside the Warudo blueprint editor itself has not been done yet — this is the next concrete step.
 - ElevenLabs streaming websocket endpoint has not been integrated yet; current version waits for the full audio clip.
 - The mic-to-LLM test harness is split across `voice_chat.py` (entry/loop), `speechToText.py` (mic -> VAD -> faster-whisper), and `local_model.py` (Ollama startup + chat) — it is not yet wired into `orchestrator.py` or the WebSocket bridge.
-- `key_facts` are read by `build_context` but not auto-written yet (manual / future extractor).
+- `key_facts` are read by light/full context builders but not auto-written yet (manual / future extractor).
 
 ## Environment notes
 - Local GPU: RTX 5070 Ti, 16GB VRAM, used for local LLM inference via Ollama

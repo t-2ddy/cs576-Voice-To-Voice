@@ -8,7 +8,7 @@ transcript and the reply to the terminal.
 Compartmentalized into:
 - speechToText.py — mic capture, VAD, faster-whisper
 - local_model.py — Ollama server/model + chat requests
-- chat_memory.py — Supabase four-tier memory (store / build_context / prune)
+- chat_memory.py — Supabase four-tier memory (store / build_context_if_needed / prune)
 - voice_chat.py (this file) — wires the services and runs the loop
 
 Not yet wired into orchestrator.py / the WebSocket bridge -- see
@@ -17,14 +17,14 @@ Not yet wired into orchestrator.py / the WebSocket bridge -- see
 
 import sys
 
-from chat_memory import build_context, prune_recent_turns, store_turn
+from chat_memory import build_context_if_needed, prune_recent_turns, store_turn
 from local_model import LocalModel
 from speechToText import SpeechToText
 
 # After this many assistant replies, archive overflow recent_turns into long-term memory.
 PRUNE_EVERY_N_ASSISTANT_TURNS = 10
 # Keep only the system message + this many latest user/assistant messages in the
-# in-process history. Durable recent turns come from Supabase via build_context.
+# in-process history. Durable recent turns come from Supabase via build_context_if_needed.
 LOCAL_HISTORY_MAX_MESSAGES = 10
 
 
@@ -62,7 +62,7 @@ def main() -> None:
         sys.exit(1)
 
     persona = local_model.system_prompt
-    # Session-local transcript for display/debug capping; Ollama asks use build_context.
+    # Session-local transcript for display/debug capping; Ollama asks use build_context_if_needed.
     history: list[dict] = local_model.build_initial_history()
     assistant_turns = 0
 
@@ -77,7 +77,8 @@ def main() -> None:
                 history.append({"role": "user", "content": text})
 
                 try:
-                    context = build_context(text)
+                    context, memory_mode = build_context_if_needed(text)
+                    print(f"(memory: {memory_mode})")
                     ask_history = _build_ask_history(persona, context, text)
                     reply = local_model.ask(ask_history)
                 except Exception as exc:
