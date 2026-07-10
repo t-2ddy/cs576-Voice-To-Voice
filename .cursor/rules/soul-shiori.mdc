@@ -6,13 +6,12 @@ alwaysApply: true
 # Project: Local AI VTuber Companion
 
 ## Goal
-An AI VTuber companion with a local LLM for chat generation, ElevenLabs for TTS, and Warudo for the 3D avatar/lipsync rendering.
+An AI VTuber companion with a local LLM for chat generation and ElevenLabs for TTS. Avatar/lipsync rendering is out of scope for now (see TBD).
 
 ## Stack decisions (already made, do not re-litigate unless there's a real problem)
 - **Chat generation**: local LLM via Ollama (OpenAI-compatible API at `http://localhost:11434`), model `hf.co/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive:Q6_K` (switched from the 9B Gemma model — the 9B model alone used ~10GB/16GB VRAM, leaving too little headroom for faster-whisper's CUDA/cuBLAS init alongside it; under investigation as the cause of intermittent `cublas64_12.dll is not found or cannot be loaded` crashes in the voice harness / `speechToText.py`)
-- **TTS**: ElevenLabs API (REST `text-to-speech` endpoint initially; streaming websocket endpoint is the planned upgrade once the basic pipeline works)
-- **Avatar/rendering**: Warudo, using its built-in audio-based lipsync node
-- **Bridge**: custom orchestrator server (Python) that Warudo connects to via WebSocket. This was chosen over a simpler folder-watch approach specifically because the connection needs to carry more than just audio later (expressions, status, interrupts, eventual STT).
+- **TTS**: ElevenLabs REST `text-to-speech` in `server/elevenlabs_tts.py` (Shiori replies only). Env: `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` in `server/.env`. MP3 is base64-broadcast on the chat WS (`type: audio`) and played in the React client. Streaming websocket TTS is a future upgrade.
+- **Bridge**: custom orchestrator server (Python) that clients connect to via WebSocket. This was chosen over a simpler folder-watch approach specifically because the connection needs to carry more than just audio later (expressions, status, interrupts, eventual STT).
 - **STT**: `faster-whisper`, model `large-v3-turbo`, `device="cuda"`, `compute_type="float16"`. Turn-taking (deciding when an utterance starts/stops) is handled by a simple RMS energy-threshold VAD rather than a native VAD library — `webrtcvad` has no Python 3.14 wheels and is unmaintained, so a dependency-free heuristic was chosen instead.
 - **Chat memory (Supabase)**: four-tier schema already live — `key_facts`, `rolling_summary`, `chat_memory` (`vector(768)` + HNSW), `recent_turns`, plus RPC `match_memory`. Embeddings via local Ollama `nomic-embed-text` (768-d). API in `chat_memory.py` (`store_turn`, `should_retrieve_memory`, `build_light_context` / `build_full_context`, `build_context_if_needed`, `prune_recent_turns`, etc.). Selective retrieval: heuristic gate skips semantic search on filler/chatty turns; light context = facts + summary (session-cached) + recent turns; full context adds `retrieve_relevant`. Wired into `voice_chat.py`: `build_context_if_needed` each turn (logs `(memory: light|full)`), turns stored after each reply, prune every 10 assistant turns (invalidates light cache). Env: `SUPABASE_URL` (project root, no `/rest/v1`), `SUPABASE_SERVICE_ROLE_KEY`.
 
@@ -21,43 +20,37 @@ An AI VTuber companion with a local LLM for chat generation, ElevenLabs for TTS,
 ↓
 ElevenLabs TTS API → audio bytes
 ↓
-WebSocket broadcast (localhost:8765)
+WebSocket broadcast (chat UI bridge, localhost:8766)
 ↓
-WarudoBridgeAsset.cs (Playground asset)
-↓
-Warudo's Generate Lip Sync Animation node
+React client (VN textbox + MP3 playback)
 
 ## Message protocol (WebSocket, JSON)
-Warudo / audio bridge (planned, localhost:8765):
-```json
-{"type": "audio", "format": "mp3", "data": "<base64>"}
-{"type": "expression", "value": "smile"}
-{"type": "status", "value": "speaking"}
-```
-
 Chat UI bridge (live, localhost:8766 via `server/chat_bridge.py`, started by `voice_chat.py`):
 ```json
 {"type": "chat", "who": "you", "text": "..."}
 {"type": "chat", "who": "shiori", "text": "..."}
+{"type": "audio", "format": "mp3", "data": "<base64>"}
 {"type": "status", "value": "listening"}
 {"type": "status", "value": "thinking"}
+{"type": "status", "value": "speaking"}
 {"type": "status", "value": "ready"}
 {"type": "status", "value": "error", "detail": "..."}
 ```
-The Vite client proxies `/ws` → `ws://127.0.0.1:8766` and live-replaces the VN textbox on each `chat` event. Mic/STT remain in Python.
+The Vite client proxies `/ws` → `ws://127.0.0.1:8766`, live-replaces the VN textbox on each `chat` event, and plays `audio` MP3 for Shiori. Mic/STT remain in Python; TTS runs server-side before the Shiori `chat`+`audio` emit.
 
 Every future feature should be a new `type` value, not a new connection or transport.
 
 ## Known unresolved items / caveats
-- The exact method for triggering a node function from an Asset and loading a file path into an `AudioClip` for Warudo's lipsync node has **not been verified against the real Warudo SDK** — needs checking against `ExampleNode.cs` and `GetRandomSoundNode.cs` from Warudo's official SDK examples (`WarudoPluginExamples` repo, HakuyaLabs on GitHub) before treating it as correct.
-- The lipsync node wiring inside the Warudo blueprint editor itself has not been done yet — this is the next concrete step.
-- ElevenLabs streaming websocket endpoint has not been integrated yet; current version waits for the full audio clip.
-- The mic-to-LLM test harness is split across `server/voice_chat.py` (entry/loop), `speechToText.py`, `local_model.py`, and `chat_bridge.py` (WS :8766 to the React UI). It is not yet wired into `orchestrator.py` or the Warudo WebSocket bridge.
+- ElevenLabs streaming websocket endpoint has not been integrated yet; current path uses full-clip REST TTS (`elevenlabs_tts.py`) then WS `audio` to the UI.
+- The mic-to-LLM test harness is split across `server/voice_chat.py` (entry/loop), `speechToText.py`, `local_model.py`, `elevenlabs_tts.py`, and `chat_bridge.py` (WS :8766 to the React UI). It is not yet wired into `orchestrator.py`.
 - `key_facts` are read by light/full context builders but not auto-written yet (manual / future extractor).
 
 ## Environment notes
 - Local GPU: RTX 5070 Ti, 16GB VRAM, used for local LLM inference via Ollama
-- Windows desktop, so Warudo runs natively there (Warudo is Windows-only via Unity)
+- Windows desktop
 
 ## Immediate next step
-Wire `WarudoBridgeAsset`'s trigger/output into Warudo's built-in "Generate Lip Sync Animation" node inside the blueprint editor, and verify the Asset API calls against the official SDK examples before assuming they're correct.
+Continue hardening the voice harness + chat UI path (STT → LLM → TTS → WS :8766), and wire it into `orchestrator.py` when ready.
+
+## TBD (out of scope for now)
+- **Avatar / 3D rendering / lipsync**: previously planned around Warudo (WebSocket bridge on :8765, `WarudoBridgeAsset.cs`, audio-based lipsync node). Warudo is **not part of the project anymore**. Revisit avatar/lipsync tooling later if needed; do not treat Warudo, its SDK, or the old Warudo bridge as active work.

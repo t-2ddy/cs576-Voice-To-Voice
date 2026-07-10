@@ -3,12 +3,14 @@
 Listens on ws://127.0.0.1:8766 (any path, including /ws from the Vite proxy).
 Clients receive JSON events:
   {"type": "chat", "who": "you"|"shiori", "text": "..."}
-  {"type": "status", "value": "listening"|"thinking"|"ready"|"error", "detail"?: "..."}
+  {"type": "audio", "format": "mp3", "data": "<base64>"}
+  {"type": "status", "value": "listening"|"thinking"|"speaking"|"ready"|"error", "detail"?: "..."}
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import threading
 import time
@@ -57,6 +59,17 @@ def broadcast(event: dict[str, Any]) -> None:
 
 def emit_chat(who: str, text: str) -> None:
     broadcast({"type": "chat", "who": who, "text": text})
+
+
+def emit_audio(mp3_bytes: bytes) -> None:
+    """Broadcast MP3 audio as base64 for the React client to play."""
+    broadcast(
+        {
+            "type": "audio",
+            "format": "mp3",
+            "data": base64.b64encode(mp3_bytes).decode("ascii"),
+        }
+    )
 
 
 def emit_status(value: str, detail: str | None = None) -> None:

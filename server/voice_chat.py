@@ -13,6 +13,7 @@ Compartmentalized into:
 - local_model.py — Ollama server/model + chat requests
 - chat_memory.py — Supabase four-tier memory (store / build_context_if_needed / prune)
 - chat_bridge.py — WebSocket broadcast to the UI
+- elevenlabs_tts.py — ElevenLabs REST TTS for Shiori replies
 - voice_chat.py (this file) — wires the services and runs the loop
 
 Not yet wired into orchestrator.py / the Warudo WebSocket bridge -- see
@@ -21,8 +22,9 @@ Not yet wired into orchestrator.py / the Warudo WebSocket bridge -- see
 
 import sys
 
-from chat_bridge import emit_chat, emit_status, start_chat_bridge
+from chat_bridge import emit_audio, emit_chat, emit_status, start_chat_bridge
 from chat_memory import build_context_if_needed, prune_recent_turns, store_turn
+from elevenlabs_tts import extract_spoken_text, synthesize
 from local_model import LocalModel
 from speechToText import SpeechToText
 
@@ -99,7 +101,23 @@ def main() -> None:
                     continue
 
                 print(f"Shiori: {reply}")
-                emit_chat("shiori", reply)
+                spoken = extract_spoken_text(reply)
+                mp3: bytes | None = None
+                if spoken:
+                    try:
+                        mp3 = synthesize(spoken)
+                    except Exception as exc:
+                        print(f"(ElevenLabs TTS failed: {exc})", file=sys.stderr)
+                        emit_status("error", f"TTS failed: {exc}")
+                else:
+                    print("(empty spoken text; skipping TTS)", file=sys.stderr)
+
+                if mp3:
+                    emit_status("speaking")
+                    emit_chat("shiori", reply)
+                    emit_audio(mp3)
+                else:
+                    emit_chat("shiori", reply)
                 emit_status("ready")
                 history.append({"role": "assistant", "content": reply})
                 history = _cap_local_history(history)
