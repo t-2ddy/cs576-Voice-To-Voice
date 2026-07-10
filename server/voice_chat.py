@@ -5,18 +5,23 @@ simple RMS energy VAD, transcribes each utterance with faster-whisper, sends
 the running conversation to the local Ollama model, and prints both the
 transcript and the reply to the terminal.
 
+Also broadcasts the same turns over WebSocket (chat_bridge on :8766) so the
+React client can live-replace the VN textbox.
+
 Compartmentalized into:
 - speechToText.py — mic capture, VAD, faster-whisper
 - local_model.py — Ollama server/model + chat requests
 - chat_memory.py — Supabase four-tier memory (store / build_context_if_needed / prune)
+- chat_bridge.py — WebSocket broadcast to the UI
 - voice_chat.py (this file) — wires the services and runs the loop
 
-Not yet wired into orchestrator.py / the WebSocket bridge -- see
+Not yet wired into orchestrator.py / the Warudo WebSocket bridge -- see
 .cursor/rules/soul-shiori.mdc for the overall architecture.
 """
 
 import sys
 
+from chat_bridge import emit_chat, emit_status, start_chat_bridge
 from chat_memory import build_context_if_needed, prune_recent_turns, store_turn
 from local_model import LocalModel
 from speechToText import SpeechToText
@@ -54,6 +59,9 @@ def _cap_local_history(history: list[dict], max_messages: int = LOCAL_HISTORY_MA
 
 
 def main() -> None:
+    start_chat_bridge()
+    print("Chat UI bridge listening on ws://127.0.0.1:8766")
+
     local_model = LocalModel()
     try:
         local_model.start()
@@ -69,24 +77,30 @@ def main() -> None:
     with SpeechToText() as stt:
         try:
             while True:
+                emit_status("listening")
                 text = stt.listen_for_utterance()
                 if not text:
                     continue
 
                 print(f"You: {text}")
+                emit_chat("you", text)
                 history.append({"role": "user", "content": text})
 
                 try:
+                    emit_status("thinking")
                     context, memory_mode = build_context_if_needed(text)
                     print(f"(memory: {memory_mode})")
                     ask_history = _build_ask_history(persona, context, text)
                     reply = local_model.ask(ask_history)
                 except Exception as exc:
                     print(f"(Ollama/memory request failed: {exc})", file=sys.stderr)
+                    emit_status("error", str(exc))
                     history.pop()
                     continue
 
                 print(f"Shiori: {reply}")
+                emit_chat("shiori", reply)
+                emit_status("ready")
                 history.append({"role": "assistant", "content": reply})
                 history = _cap_local_history(history)
 
@@ -95,6 +109,7 @@ def main() -> None:
                     store_turn("assistant", reply)
                 except Exception as exc:
                     print(f"(failed to store turns: {exc})", file=sys.stderr)
+                    emit_status("error", f"failed to store turns: {exc}")
                     continue
 
                 assistant_turns += 1
@@ -103,6 +118,7 @@ def main() -> None:
                         prune_recent_turns(keep_last=10)
                     except Exception as exc:
                         print(f"(prune_recent_turns failed: {exc})", file=sys.stderr)
+                        emit_status("error", f"prune failed: {exc}")
         except KeyboardInterrupt:
             print("\nExiting.")
 

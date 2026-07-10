@@ -28,18 +28,31 @@ WarudoBridgeAsset.cs (Playground asset)
 Warudo's Generate Lip Sync Animation node
 
 ## Message protocol (WebSocket, JSON)
+Warudo / audio bridge (planned, localhost:8765):
 ```json
 {"type": "audio", "format": "mp3", "data": "<base64>"}
 {"type": "expression", "value": "smile"}
 {"type": "status", "value": "speaking"}
 ```
+
+Chat UI bridge (live, localhost:8766 via `server/chat_bridge.py`, started by `voice_chat.py`):
+```json
+{"type": "chat", "who": "you", "text": "..."}
+{"type": "chat", "who": "shiori", "text": "..."}
+{"type": "status", "value": "listening"}
+{"type": "status", "value": "thinking"}
+{"type": "status", "value": "ready"}
+{"type": "status", "value": "error", "detail": "..."}
+```
+The Vite client proxies `/ws` → `ws://127.0.0.1:8766` and live-replaces the VN textbox on each `chat` event. Mic/STT remain in Python.
+
 Every future feature should be a new `type` value, not a new connection or transport.
 
 ## Known unresolved items / caveats
 - The exact method for triggering a node function from an Asset and loading a file path into an `AudioClip` for Warudo's lipsync node has **not been verified against the real Warudo SDK** — needs checking against `ExampleNode.cs` and `GetRandomSoundNode.cs` from Warudo's official SDK examples (`WarudoPluginExamples` repo, HakuyaLabs on GitHub) before treating it as correct.
 - The lipsync node wiring inside the Warudo blueprint editor itself has not been done yet — this is the next concrete step.
 - ElevenLabs streaming websocket endpoint has not been integrated yet; current version waits for the full audio clip.
-- The mic-to-LLM test harness is split across `voice_chat.py` (entry/loop), `speechToText.py` (mic -> VAD -> faster-whisper), and `local_model.py` (Ollama startup + chat) — it is not yet wired into `orchestrator.py` or the WebSocket bridge.
+- The mic-to-LLM test harness is split across `server/voice_chat.py` (entry/loop), `speechToText.py`, `local_model.py`, and `chat_bridge.py` (WS :8766 to the React UI). It is not yet wired into `orchestrator.py` or the Warudo WebSocket bridge.
 - `key_facts` are read by light/full context builders but not auto-written yet (manual / future extractor).
 
 ## Environment notes

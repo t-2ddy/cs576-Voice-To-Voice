@@ -1,18 +1,5 @@
-import { useCallback, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import './App.css'
-
-const MOCK_MESSAGES = [
-  { who: 'you', text: 'Hi, my name\'s Theo. Nice to meet you.' },
-  {
-    who: 'shiori',
-    text: 'Oh, dear reader! A name like Theo in my files already… thrilling.',
-  },
-  { who: 'you', text: 'Do you remember me?' },
-  {
-    who: 'shiori',
-    text: 'Of course I remember — you\'re already bookmarked in my collection.',
-  },
-]
 
 const TASKBAR_ICONS = [
   { src: '/icon_home.png', label: 'Start' },
@@ -21,6 +8,15 @@ const TASKBAR_ICONS = [
 ]
 
 const TASKBAR_HEIGHT = 40
+
+const STATUS_LABELS = {
+  listening: 'Listening...',
+  thinking: 'Thinking...',
+  ready: 'Ready',
+  error: 'Error',
+  offline: 'Offline',
+  connecting: 'Connecting...',
+}
 
 function TitleButtons() {
   return (
@@ -69,25 +65,80 @@ function clampPos(x, y, width, height) {
   }
 }
 
+function useChatBridge() {
+  const [line, setLine] = useState(null)
+  const [status, setStatus] = useState('connecting')
+  const [statusDetail, setStatusDetail] = useState('')
+  const retryRef = useRef(1000)
+
+  useEffect(() => {
+    let ws
+    let closed = false
+    let timer
+
+    const connect = () => {
+      if (closed) return
+      setStatus((s) => (s === 'ready' || s === 'listening' || s === 'thinking' ? s : 'connecting'))
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      ws = new WebSocket(`${proto}://${window.location.host}/ws`)
+
+      ws.onopen = () => {
+        retryRef.current = 1000
+        setStatus('ready')
+        setStatusDetail('')
+      }
+
+      ws.onmessage = (event) => {
+        let data
+        try {
+          data = JSON.parse(event.data)
+        } catch {
+          return
+        }
+        if (data.type === 'chat' && data.text) {
+          setLine({ who: data.who === 'you' ? 'you' : 'shiori', text: data.text })
+        } else if (data.type === 'status' && data.value) {
+          setStatus(data.value)
+          setStatusDetail(data.detail || '')
+        }
+      }
+
+      ws.onclose = () => {
+        if (closed) return
+        setStatus('offline')
+        const delay = retryRef.current
+        retryRef.current = Math.min(delay * 1.5, 10_000)
+        timer = setTimeout(connect, delay)
+      }
+
+      ws.onerror = () => {
+        ws.close()
+      }
+    }
+
+    connect()
+
+    return () => {
+      closed = true
+      clearTimeout(timer)
+      if (ws) ws.close()
+    }
+  }, [])
+
+  return { line, status, statusDetail }
+}
+
 function App() {
-  const [lineIndex, setLineIndex] = useState(0)
+  const { line, status, statusDetail } = useChatBridge()
   const [pos, setPos] = useState(null)
   const dragRef = useRef(null)
   const winRef = useRef(null)
 
-  const line = MOCK_MESSAGES[lineIndex]
-  const speakerLabel = line.who === 'you' ? 'You' : 'Shiori'
-
-  const advance = useCallback(() => {
-    setLineIndex((i) => (i + 1) % MOCK_MESSAGES.length)
-  }, [])
-
-  const onKeyDown = (e) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault()
-      advance()
-    }
-  }
+  const speakerLabel = line?.who === 'you' ? 'You' : 'Shiori'
+  const statusLabel =
+    status === 'error' && statusDetail
+      ? `Error: ${statusDetail}`
+      : STATUS_LABELS[status] || status
 
   const onTitlePointerDown = (e) => {
     if (e.button !== 0) return
@@ -173,32 +224,26 @@ function App() {
         </header>
 
         <div className="client">
-          <div
-            className="stage"
-            role="button"
-            tabIndex={0}
-            onClick={advance}
-            onKeyDown={onKeyDown}
-            aria-label="Dialogue stage. Press Enter or Space to continue."
-          >
+          <div className="stage" aria-live="polite">
             <img
               className="vn-art"
               src="/shiori.gif"
               alt="Shiori Novella"
             />
 
-            <div className={`vn-textbox vn-${line.who}`}>
-              <div className="vn-name">{speakerLabel}</div>
-              <p className="vn-line">{line.text}</p>
-              <span className="vn-hint" aria-hidden="true">
-                ▼ Click to continue
-              </span>
+            <div className={`vn-textbox ${line ? `vn-${line.who}` : 'vn-waiting'}`}>
+              <div className="vn-name">{line ? speakerLabel : 'Archive'}</div>
+              <p className="vn-line">
+                {line?.text || 'Waiting for voice…'}
+              </p>
             </div>
           </div>
         </div>
 
         <footer className="status-bar">
-          <span className="status-cell">Ready</span>
+          <span className="status-cell" title={statusDetail || undefined}>
+            {statusLabel}
+          </span>
           <span className="status-cell status-right">Local companion</span>
         </footer>
       </div>
