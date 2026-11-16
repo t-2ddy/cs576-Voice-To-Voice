@@ -1,4 +1,4 @@
-"""ElevenLabs REST text-to-speech for Shiori replies.
+"""ElevenLabs REST text-to-speech for Frieren replies.
 Env (server/.env):
   ELEVENLABS_API_KEY
   ELEVENLABS_VOICE_ID

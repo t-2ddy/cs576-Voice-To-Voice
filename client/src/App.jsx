@@ -5,7 +5,7 @@ const TASKBAR_ICONS = [
   { src: '/icon_home.png', label: 'Start' },
   { src: '/icon_internet_explorer.png', label: 'Internet Explorer' },
   { src: '/icon_file_explorer.png', label: 'File Explorer' },
-  { src: '/shiori_still.jpg', label: 'Shiori - Archive' }
+  { src: '/frieren_still.jpg', label: 'Frieren - Grimoire' }
 ]
 
 const TASKBAR_HEIGHT = 40
@@ -163,7 +163,7 @@ function useChatBridge() {
           return
         }
         if (data.type === 'chat' && data.text) {
-          setLine({ who: data.who === 'you' ? 'you' : 'shiori', text: data.text })
+          setLine({ who: data.who === 'you' ? 'you' : 'frieren', text: data.text })
         } else if (data.type === 'audio' && data.data) {
           playMp3Base64(data.data)
         } else if (data.type === 'status' && data.value) {
@@ -210,7 +210,7 @@ function App() {
   const resizeRef = useRef(null)
   const winRef = useRef(null)
 
-  const speakerLabel = line?.who === 'you' ? 'You' : 'Shiori'
+  const speakerLabel = line?.who === 'you' ? 'You' : 'Frieren'
   const statusLabel =
     status === 'error' && statusDetail
       ? `Error: ${statusDetail}`
@@ -352,7 +352,7 @@ function App() {
         className={`win${placed ? ' is-dragged' : ' is-centered'}`}
         style={winStyle}
         role="application"
-        aria-label="Shiori Archive"
+        aria-label="Frieren Grimoire"
       >
         <header
           className="title-bar"
@@ -362,8 +362,8 @@ function App() {
           onPointerCancel={onTitlePointerUp}
         >
           <div className="title-left">
-            <img className="title-icon" src="/shiori.gif" alt="" width="16" height="16" />
-            <span className="title-text">Shiori - Archive</span>
+            <img className="title-icon" src="/frieren.gif" alt="" width="16" height="16" />
+            <span className="title-text">Frieren - Grimoire</span>
           </div>
           <TitleButtons />
         </header>
@@ -372,12 +372,12 @@ function App() {
           <div className="stage" aria-live="polite">
             <img
               className="vn-art"
-              src="/shiori.gif"
-              alt="Shiori Novella"
+              src="/frieren.gif"
+              alt="Frieren"
             />
 
             <div className={`vn-textbox ${line ? `vn-${line.who}` : 'vn-waiting'}`}>
-              <div className="vn-name">{line ? speakerLabel : 'Archive'}</div>
+              <div className="vn-name">{line ? speakerLabel : 'Grimoire'}</div>
               <p className="vn-line">
                 {line?.text || 'Waiting for voice…'}
               </p>

@@ -1,50 +1,20 @@
-"""Microphone capture, RMS VAD, and faster-whisper transcription for soul_shiori."""
+"""Microphone capture, RMS VAD, and OpenAI speech-to-text.
 
-import ctypes
-import importlib.util
+Env (server/.env):
+  OPENAI_API_KEY
+  STT_MODEL  (optional, default gpt-4o-mini-transcribe; whisper-1 also works)
+"""
+
+import io
 import os
 import queue
 import sys
+import wave
 
 import numpy as np
 import sounddevice as sd
 
-
-def _add_nvidia_dll_dirs() -> None:
-    """Register pip-installed NVIDIA CUDA/cuDNN DLL folders (nvidia-cublas-cu12,
-    nvidia-cudnn-cu12) so CTranslate2 can find cublas64_12.dll / cudnn64_9.dll
-    on Windows without requiring them to be on the system PATH."""
-    if sys.platform != "win32" or not hasattr(os, "add_dll_directory"):
-        return
-    for package in ("nvidia.cublas", "nvidia.cudnn"):
-        spec = importlib.util.find_spec(package)
-        if not spec or not spec.submodule_search_locations:
-            continue
-        bin_dir = os.path.join(next(iter(spec.submodule_search_locations)), "bin")
-        if os.path.isdir(bin_dir):
-            os.add_dll_directory(bin_dir)
-
-
-def _preload_cuda_dlls() -> None:
-    """Explicitly load cuBLAS/cuDNN via ctypes so they're already resident in
-    the process. CTranslate2 loads these internally via a plain LoadLibrary()
-    call that does NOT consult os.add_dll_directory()-registered folders, but
-    Windows resolves LoadLibrary for an already-loaded DLL instantly from the
-    process's module cache regardless of search flags, so preloading here is
-    what actually makes CTranslate2's later internal load succeed."""
-    if sys.platform != "win32":
-        return
-    for dll_name in ("cublas64_12.dll", "cublasLt64_12.dll", "cudnn64_9.dll"):
-        try:
-            ctypes.WinDLL(dll_name)
-        except OSError:
-            pass
-
-
-_add_nvidia_dll_dirs()
-_preload_cuda_dlls()
-
-from faster_whisper import WhisperModel  # noqa: E402 (must follow DLL directory setup)
+from openai_client import get_openai_client
 
 SAMPLE_RATE = 16000
 FRAME_MS = 30
@@ -60,9 +30,7 @@ MAX_UTTERANCE_SECONDS = 30
 PRE_BUFFER_MS = 300  # kept before speech onset so the start of words isn't clipped
 MIN_UTTERANCE_SECONDS = 0.3  # discard shorter blips (coughs, clicks, etc.)
 
-WHISPER_MODEL_NAME = "large-v3-turbo"
-WHISPER_DEVICE = "cuda"
-WHISPER_COMPUTE_TYPE = "float16"
+STT_MODEL = os.getenv("STT_MODEL", "gpt-4o-mini-transcribe").strip()
 
 
 def rms(frame: np.ndarray) -> float:
@@ -122,21 +90,32 @@ def record_utterance(frame_queue: queue.Queue, threshold: float) -> np.ndarray |
     return audio
 
 
-def transcribe(model: WhisperModel, audio_int16: np.ndarray) -> str:
-    audio_f32 = audio_int16.astype(np.float32) / 32768.0
-    segments, _info = model.transcribe(audio_f32, vad_filter=True, language="en")
-    return "".join(segment.text for segment in segments).strip()
+def _to_wav_bytes(audio_int16: np.ndarray) -> bytes:
+    """Wrap mono int16 PCM in an in-memory WAV container for upload."""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(SAMPLE_RATE)
+        wav.writeframes(audio_int16.tobytes())
+    return buffer.getvalue()
+
+
+def transcribe(audio_int16: np.ndarray) -> str:
+    result = get_openai_client().audio.transcriptions.create(
+        model=STT_MODEL,
+        file=("utterance.wav", _to_wav_bytes(audio_int16), "audio/wav"),
+        language="en",
+    )
+    return result.text.strip()
 
 
 class SpeechToText:
-    """Owns the Whisper model, mic InputStream, and frame queue/callback."""
+    """Owns the mic InputStream and frame queue/callback."""
 
     def __init__(self) -> None:
         self._frame_queue: queue.Queue = queue.Queue()
-        print("Loading faster-whisper model (this can take a moment on first run)...")
-        self._model = WhisperModel(
-            WHISPER_MODEL_NAME, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE
-        )
+        get_openai_client()  # fail fast if OPENAI_API_KEY is missing
         self._stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
             channels=1,
@@ -166,4 +145,4 @@ class SpeechToText:
         audio = record_utterance(self._frame_queue, self._threshold)
         if audio is None:
             return None
-        return transcribe(self._model, audio)
+        return transcribe(audio)

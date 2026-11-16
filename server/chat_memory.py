@@ -1,4 +1,4 @@
-"""Supabase-backed chat memory for soul_shiori.
+"""Supabase-backed chat memory for the voice companion.
 
 Four memory tiers (schema already live in Supabase):
   1. key_facts       — durable key/value facts (not used by prune)
@@ -17,26 +17,26 @@ Required .env keys:
   SUPABASE_URL              (project root, e.g. https://xxxx.supabase.co — no /rest/v1)
   SUPABASE_SERVICE_ROLE_KEY
 
-Embeddings: local Ollama nomic-embed-text (768-d, must match vector(768)).
+Embeddings: OpenAI text-embedding-3-small at 768 dimensions (must match vector(768)).
+Rows embedded by the old nomic model are not comparable and must be cleared.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import urllib.request
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
-from local_model import OLLAMA_CHAT_URL, OLLAMA_HOST, OLLAMA_MODEL
+from local_model import complete_chat
+from openai_client import get_openai_client
 
 load_dotenv()
 
-EMBED_MODEL = "nomic-embed-text"
-OLLAMA_EMBED_URL = f"{OLLAMA_HOST}/api/embeddings"
+EMBED_MODEL = "text-embedding-3-small"
+EMBED_DIMENSIONS = 768
 
 _supabase: Client | None = None
 
@@ -125,20 +125,13 @@ def get_supabase() -> Client:
 
 
 def embed(text: str) -> list[float]:
-    """Return a 768-d embedding from local Ollama nomic-embed-text."""
-    payload = json.dumps({"model": EMBED_MODEL, "prompt": text}).encode("utf-8")
-    request = urllib.request.Request(
-        OLLAMA_EMBED_URL,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    """Return a 768-d embedding from OpenAI text-embedding-3-small."""
+    response = get_openai_client().embeddings.create(
+        model=EMBED_MODEL,
+        input=text,
+        dimensions=EMBED_DIMENSIONS,
     )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        body = json.loads(response.read().decode("utf-8"))
-    embedding = body.get("embedding")
-    if not embedding:
-        raise RuntimeError(f"Ollama embeddings response missing 'embedding': {body!r}")
-    return embedding
+    return response.data[0].embedding
 
 
 def store_turn(speaker: str, content: str) -> None:
@@ -345,23 +338,7 @@ def update_rolling_summary(overflow: list[dict]) -> None:
             ),
         },
     ]
-    payload = json.dumps(
-        {
-            "model": OLLAMA_MODEL,
-            "messages": messages,
-            "stream": False,
-            "think": False,
-        }
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        OLLAMA_CHAT_URL,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=300) as response:
-        body = json.loads(response.read().decode("utf-8"))
-    new_summary = body["message"]["content"].strip()
+    new_summary = complete_chat(messages)
     new_turn_count = current_turn_count + len(overflow)
     now = datetime.now(timezone.utc).isoformat()
 

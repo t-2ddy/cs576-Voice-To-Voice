@@ -2,7 +2,7 @@
 
 Listens on ws://127.0.0.1:8766 (any path, including /ws from the Vite proxy).
 Clients receive JSON events:
-  {"type": "chat", "who": "you"|"shiori", "text": "..."}
+  {"type": "chat", "who": "you"|"frieren", "text": "..."}
   {"type": "audio", "format": "mp3", "data": "<base64>"}
   {"type": "status", "value": "listening"|"thinking"|"speaking"|"ready"|"error", "detail"?: "..."}
 """

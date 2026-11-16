@@ -1,23 +1,23 @@
-"""Standalone mic -> STT -> local LLM test harness for soul_shiori.
+"""Mic -> STT -> LLM -> TTS voice loop for the cs576 voice companion.
 
 Continuously listens to the microphone, auto-detects speech turns with a
-simple RMS energy VAD, transcribes each utterance with faster-whisper, sends
-the running conversation to the local Ollama model, and prints both the
-transcript and the reply to the terminal.
+simple RMS energy VAD, transcribes each utterance with OpenAI, sends the
+conversation (plus Supabase memory context) to the OpenAI chat model, and
+prints both the transcript and the reply to the terminal.
 
 Also broadcasts the same turns over WebSocket (chat_bridge on :8766) so the
 React client can live-replace the VN textbox.
 
 Compartmentalized into:
-- speechToText.py — mic capture, VAD, faster-whisper
-- local_model.py — Ollama server/model + chat requests
+- openai_client.py — shared OpenAI client (one OPENAI_API_KEY)
+- speechToText.py — mic capture, VAD, OpenAI transcription
+- local_model.py — OpenAI chat requests + persona
 - chat_memory.py — Supabase four-tier memory (store / build_context_if_needed / prune)
 - chat_bridge.py — WebSocket broadcast to the UI
-- elevenlabs_tts.py — ElevenLabs REST TTS for Shiori replies
+- elevenlabs_tts.py — ElevenLabs REST TTS for character replies
 - voice_chat.py (this file) — wires the services and runs the loop
 
-Not yet wired into orchestrator.py / the Warudo WebSocket bridge -- see
-.cursor/rules/soul-shiori.mdc for the overall architecture.
+See .cursor/rules/voice-to-voice.mdc for the overall architecture.
 """
 
 import sys
@@ -36,7 +36,7 @@ LOCAL_HISTORY_MAX_MESSAGES = 10
 
 
 def _build_ask_history(persona: str, context: str, user_text: str) -> list[dict]:
-    """System (persona + memory context) + current user turn for one Ollama call.
+    """System (persona + memory context) + current user turn for one chat call.
 
     Recent turns live in `context` from Supabase, so we do not also replay a
     long local history (avoids double-sending the same turns).
@@ -72,7 +72,7 @@ def main() -> None:
         sys.exit(1)
 
     persona = local_model.system_prompt
-    # Session-local transcript for display/debug capping; Ollama asks use build_context_if_needed.
+    # Session-local transcript for display/debug capping; chat asks use build_context_if_needed.
     history: list[dict] = local_model.build_initial_history()
     assistant_turns = 0
 
@@ -80,7 +80,12 @@ def main() -> None:
         try:
             while True:
                 emit_status("listening")
-                text = stt.listen_for_utterance()
+                try:
+                    text = stt.listen_for_utterance()
+                except Exception as exc:
+                    print(f"(speech-to-text request failed: {exc})", file=sys.stderr)
+                    emit_status("error", f"STT failed: {exc}")
+                    continue
                 if not text:
                     continue
 
@@ -95,12 +100,12 @@ def main() -> None:
                     ask_history = _build_ask_history(persona, context, text)
                     reply = local_model.ask(ask_history)
                 except Exception as exc:
-                    print(f"(Ollama/memory request failed: {exc})", file=sys.stderr)
+                    print(f"(chat/memory request failed: {exc})", file=sys.stderr)
                     emit_status("error", str(exc))
                     history.pop()
                     continue
 
-                print(f"Shiori: {reply}")
+                print(f"Frieren: {reply}")
                 spoken = extract_spoken_text(reply)
                 mp3: bytes | None = None
                 if spoken:
@@ -114,10 +119,10 @@ def main() -> None:
 
                 if mp3:
                     emit_status("speaking")
-                    emit_chat("shiori", reply)
+                    emit_chat("frieren", reply)
                     emit_audio(mp3)
                 else:
-                    emit_chat("shiori", reply)
+                    emit_chat("frieren", reply)
                 emit_status("ready")
                 history.append({"role": "assistant", "content": reply})
                 history = _cap_local_history(history)

@@ -1,4 +1,4 @@
-# Shiori client
+# Frieren client
 
 ```bash
 npm run dev
