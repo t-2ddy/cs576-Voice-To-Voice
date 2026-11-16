@@ -22,7 +22,7 @@ See .cursor/rules/voice-to-voice.mdc for the overall architecture.
 
 import sys
 
-from chat_bridge import emit_audio, emit_chat, emit_status, start_chat_bridge
+from chat_bridge import emit_audio, emit_chat, emit_status, start_chat_bridge, wait_for_playback
 from chat_memory import build_context_if_needed, prune_recent_turns, store_turn
 from elevenlabs_tts import extract_spoken_text, synthesize
 from local_model import LocalModel
@@ -30,9 +30,10 @@ from speechToText import SpeechToText
 
 # After this many assistant replies, archive overflow recent_turns into long-term memory.
 PRUNE_EVERY_N_ASSISTANT_TURNS = 10
-# Keep only the system message + this many latest user/assistant messages in the
-# in-process history. Durable recent turns come from Supabase via build_context_if_needed.
-LOCAL_HISTORY_MAX_MESSAGES = 10
+# ElevenLabs' default output is 128 kbps MP3, used to estimate clip length when
+# the UI never reports playback_done (tab closed, autoplay blocked, etc.).
+MP3_BYTES_PER_SECOND = 16_000
+PLAYBACK_GRACE_SECONDS = 3.0
 
 
 def _build_ask_history(persona: str, context: str, user_text: str) -> list[dict]:
@@ -49,17 +50,6 @@ def _build_ask_history(persona: str, context: str, user_text: str) -> list[dict]
     return history
 
 
-def _cap_local_history(history: list[dict], max_messages: int = LOCAL_HISTORY_MAX_MESSAGES) -> list[dict]:
-    """Keep leading system message (if any) plus the last max_messages turns."""
-    if not history:
-        return history
-    if history[0]["role"] == "system":
-        system = history[:1]
-        rest = history[1:]
-        return system + rest[-max_messages:]
-    return history[-max_messages:]
-
-
 def main() -> None:
     start_chat_bridge()
     print("Chat UI bridge listening on ws://127.0.0.1:8766")
@@ -72,8 +62,6 @@ def main() -> None:
         sys.exit(1)
 
     persona = local_model.system_prompt
-    # Session-local transcript for display/debug capping; chat asks use build_context_if_needed.
-    history: list[dict] = local_model.build_initial_history()
     assistant_turns = 0
 
     with SpeechToText() as stt:
@@ -91,7 +79,6 @@ def main() -> None:
 
                 print(f"You: {text}")
                 emit_chat("you", text)
-                history.append({"role": "user", "content": text})
 
                 try:
                     emit_status("thinking")
@@ -102,7 +89,6 @@ def main() -> None:
                 except Exception as exc:
                     print(f"(chat/memory request failed: {exc})", file=sys.stderr)
                     emit_status("error", str(exc))
-                    history.pop()
                     continue
 
                 print(f"Frieren: {reply}")
@@ -121,11 +107,13 @@ def main() -> None:
                     emit_status("speaking")
                     emit_chat("frieren", reply)
                     emit_audio(mp3)
+                    # Half-duplex: don't listen while the reply plays, or the mic
+                    # hears Frieren through the speakers and she answers herself.
+                    timeout = len(mp3) / MP3_BYTES_PER_SECOND + PLAYBACK_GRACE_SECONDS
+                    wait_for_playback(timeout)
+                    stt.flush()
                 else:
                     emit_chat("frieren", reply)
-                emit_status("ready")
-                history.append({"role": "assistant", "content": reply})
-                history = _cap_local_history(history)
 
                 try:
                     store_turn("user", text)

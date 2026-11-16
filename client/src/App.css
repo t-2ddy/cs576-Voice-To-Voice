@@ -335,6 +335,11 @@
   margin-left: auto;
   border-right: none;
   border-left: 1px solid #c0c0c0;
+  display: block;
+  max-width: 60%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* —— Resize handles —— */
@@ -460,6 +465,7 @@
   width: 32px;
   height: 32px;
   object-fit: contain;
+  image-rendering: pixelated;
   display: block;
   pointer-events: none;
 }

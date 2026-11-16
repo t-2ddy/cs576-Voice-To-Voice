@@ -76,8 +76,5 @@ class LocalModel:
             raise RuntimeError(f"OpenAI rejected the key or model '{LLM_MODEL}': {exc}") from exc
         print(f"OpenAI chat model ready: {LLM_MODEL}")
 
-    def build_initial_history(self) -> list[dict]:
-        return [{"role": "system", "content": self.system_prompt}] if self.system_prompt else []
-
     def ask(self, history: list[dict]) -> str:
         return ask_openai(history)

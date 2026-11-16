@@ -34,7 +34,7 @@ body {
   font-family: var(--font);
   color: var(--text);
   background-color: #0b3d91;
-  background-image: url('/windows7.jpg');
+  background-image: url('/images/background/windows7.jpg');
   background-repeat: no-repeat;
   background-attachment: fixed;
   background-size: cover;

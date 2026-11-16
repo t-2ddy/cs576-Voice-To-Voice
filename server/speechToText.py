@@ -140,6 +140,14 @@ class SpeechToText:
         self._stream.stop()
         self._stream.close()
 
+    def flush(self) -> None:
+        """Drop queued mic frames (e.g. the character's own voice picked up during playback)."""
+        while True:
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                return
+
     def listen_for_utterance(self) -> str | None:
         """Blocks until one utterance is captured, returns its transcript (or None if too short)."""
         audio = record_utterance(self._frame_queue, self._threshold)

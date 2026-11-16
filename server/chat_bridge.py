@@ -5,6 +5,8 @@ Clients receive JSON events:
   {"type": "chat", "who": "you"|"frieren", "text": "..."}
   {"type": "audio", "format": "mp3", "data": "<base64>"}
   {"type": "status", "value": "listening"|"thinking"|"speaking"|"ready"|"error", "detail"?: "..."}
+Clients may send:
+  {"type": "playback_done"}  -- the last `audio` clip finished (or failed) playing
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import time
 from typing import Any
 
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.exceptions import ConnectionClosed
 
 CHAT_WS_HOST = "127.0.0.1"
 CHAT_WS_PORT = 8766
@@ -25,12 +28,25 @@ _clients: set[ServerConnection] = set()
 _loop: asyncio.AbstractEventLoop | None = None
 _thread: threading.Thread | None = None
 _lock = threading.Lock()
+_playback_done = threading.Event()
+
+
+def _handle_client_message(raw: str | bytes) -> None:
+    try:
+        event = json.loads(raw)
+    except (TypeError, ValueError):
+        return
+    if isinstance(event, dict) and event.get("type") == "playback_done":
+        _playback_done.set()
 
 
 async def _handler(websocket: ServerConnection) -> None:
     _clients.add(websocket)
     try:
-        await websocket.wait_closed()
+        async for raw in websocket:
+            _handle_client_message(raw)
+    except ConnectionClosed:
+        pass
     finally:
         _clients.discard(websocket)
 
@@ -63,6 +79,7 @@ def emit_chat(who: str, text: str) -> None:
 
 def emit_audio(mp3_bytes: bytes) -> None:
     """Broadcast MP3 audio as base64 for the React client to play."""
+    _playback_done.clear()
     broadcast(
         {
             "type": "audio",
@@ -70,6 +87,16 @@ def emit_audio(mp3_bytes: bytes) -> None:
             "data": base64.b64encode(mp3_bytes).decode("ascii"),
         }
     )
+
+
+def wait_for_playback(timeout: float) -> bool:
+    """Block until a client reports playback_done for the last emit_audio, or timeout.
+
+    Returns False immediately when no UI is connected (nothing is playing).
+    """
+    if not _clients:
+        return False
+    return _playback_done.wait(timeout)
 
 
 def emit_status(value: str, detail: str | None = None) -> None:

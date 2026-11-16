@@ -9,7 +9,7 @@ alwaysApply: true
 An AI voice-to-voice companion. No local models: every AI step (speech-to-text, chat, embeddings) runs on a hosted API. ElevenLabs provides TTS. Avatar/lipsync rendering is out of scope for now (see TBD).
 
 ## Character
-**Frieren** (Frieren: Beyond Journey's End) — canon-faithful, deadpan elf mage traveling companion who serves as the user's mage assistant. Persona prompt lives in `server/soul`. Helping the user is framed as casting spells; those spells are intended to map to agentic tool/function calls later. WebSocket `who` value is `"frieren"`. Client labels/assets use Frieren / Grimoire (`frieren.gif`, `frieren_still.jpg`).
+**Frieren** (Frieren: Beyond Journey's End) — canon-faithful, deadpan elf mage traveling companion who serves as the user's mage assistant. Persona prompt lives in `server/soul`. Helping the user is framed as casting spells; those spells are intended to map to agentic tool/function calls later. WebSocket `who` value is `"frieren"`. Client labels use Frieren / Grimoire. Art is `client/public/images/frieren/pixFrieren.gif` (animated while speaking); the still frame for the title bar, taskbar, and idle portrait is generated in the browser from the GIF's first frame. Desktop chrome lives in `client/public/images/background/`.
 
 ## Stack decisions
 
@@ -19,7 +19,7 @@ Do not re-litigate these choices unless there's a real problem. The OpenAI migra
 
 - **Chat generation**: OpenAI chat model (mini tier, non-reasoning) via the `openai` SDK in `local_model.py`. Env: `OPENAI_API_KEY`, `LLM_MODEL` (required). Length presets set `max_completion_tokens`. `LocalModel.start()` verifies the key and model; `.ask()` sends the turn; `complete_chat()` is the shared helper. Note: OpenAI moderates output, which may change persona behavior versus the previous uncensored local model.
 
-- **Embeddings**: OpenAI `text-embedding-3-small` with `dimensions=768`, so the Supabase `vector(768)` column and `match_memory` RPC stay unchanged. Existing `chat_memory` rows were embedded with nomic and **must be truncated or re-embedded** before semantic search is reliable.
+- **Embeddings**: OpenAI `text-embedding-3-small` with `dimensions=768`, so the Supabase `vector(768)` column and `match_memory` RPC stay unchanged.
 
 - **Rolling summary**: the summarizer in `chat_memory.py` uses the same `complete_chat()` helper as replies.
 
@@ -40,6 +40,7 @@ Mic → RMS VAD → OpenAI STT → text
 
 ## Message protocol (WebSocket, JSON)
 Chat UI bridge (live, localhost:8766 via `server/chat_bridge.py`, started by `voice_chat.py`):
+Server → client:
 ```json
 {"type": "chat", "who": "you", "text": "..."}
 {"type": "chat", "who": "frieren", "text": "..."}
@@ -50,17 +51,22 @@ Chat UI bridge (live, localhost:8766 via `server/chat_bridge.py`, started by `vo
 {"type": "status", "value": "ready"}
 {"type": "status", "value": "error", "detail": "..."}
 ```
+Client → server:
+```json
+{"type": "playback_done"}
+```
+**Half-duplex turn-taking**: after emitting `audio`, `voice_chat.py` waits (`chat_bridge.wait_for_playback`) for `playback_done` before listening again, then flushes queued mic frames so Frieren's voice from the speakers isn't transcribed as the user. Fallback timeout = estimated clip length (128 kbps MP3) + 3 s; no wait when no UI is connected. The user cannot interrupt (barge-in) while she speaks.
+
+Errors: the client keeps the last error visible in the status bar until the next user turn.
 The Vite client proxies `/ws` → `ws://127.0.0.1:8766`, live-replaces the VN textbox on each `chat` event, and plays `audio` MP3 for the character. Mic capture remains in Python; STT/TTS run via hosted APIs before the character `chat`+`audio` emit.
 
 Every future feature should be a new `type` value, not a new connection or transport.
 
 ## Known unresolved items / caveats
-- Existing nomic embeddings in `chat_memory` need clearing/re-embedding after the embeddings switch.
 - Package installs require explicit user confirmation (workspace rule).
 - ElevenLabs streaming websocket endpoint has not been integrated yet; current path uses full-clip REST TTS (`elevenlabs_tts.py`) then WS `audio` to the UI.
 - The mic-to-LLM harness is split across `server/voice_chat.py` (entry/loop), `speechToText.py`, `local_model.py`, `elevenlabs_tts.py`, and `chat_bridge.py` (WS :8766 to the React UI).
 - `key_facts` are read by light/full context builders but not auto-written yet (manual / future extractor).
-- Client expects `client/public/frieren.gif` and `frieren_still.jpg` (replace former Shiori assets).
 
 ## Environment notes
 - Windows desktop
@@ -68,7 +74,8 @@ Every future feature should be a new `type` value, not a new connection or trans
 - Env vars (template in `server/.env.example`): `OPENAI_API_KEY`, `LLM_MODEL`, optional `STT_MODEL`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (plus optional `ELEVENLABS_MODEL_ID` / voice-setting overrides), `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 
 ## Immediate next steps
-1. Create the new Supabase project, run `supabase/schema.sql`, fill `server/.env`, then run an end-to-end test of the OpenAI path.
+1. Set a real `ELEVENLABS_VOICE_ID` for Frieren (the current value is a placeholder), then run an end-to-end test: `python voice_chat.py` in `server/` + `npm run dev` in `client/`.
+2. Tune VAD/turn-taking from the test (threshold, `SILENCE_END_MS`), and check that half-duplex muting works with speakers.
 
 ## TBD (out of scope for now)
 - **Avatar / 3D rendering / lipsync**: previously planned around Warudo (WebSocket bridge on :8765, `WarudoBridgeAsset.cs`, audio-based lipsync node). Warudo is **not part of the project anymore**. Revisit avatar/lipsync tooling later if needed; do not treat Warudo, its SDK, or the old Warudo bridge as active work.

@@ -1,12 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
-const TASKBAR_ICONS = [
-  { src: '/icon_home.png', label: 'Start' },
-  { src: '/icon_internet_explorer.png', label: 'Internet Explorer' },
-  { src: '/icon_file_explorer.png', label: 'File Explorer' },
-  { src: '/frieren_still.jpg', label: 'Frieren - Grimoire' }
-]
+const BG_DIR = '/images/background'
+const FRIEREN_ART = '/images/frieren/pixFrieren.gif'
 
 const TASKBAR_HEIGHT = 40
 const MIN_WIN_W = 320
@@ -22,6 +18,49 @@ const STATUS_LABELS = {
   error: 'Error',
   offline: 'Offline',
   connecting: 'Connecting...',
+}
+
+/** Decode GIF once and cache a PNG of the first frame. */
+let frierenStillPromise = null
+function loadFrierenStill() {
+  if (!frierenStillPromise) {
+    frierenStillPromise = new Promise((resolve) => {
+      const img = new Image()
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas')
+          canvas.width = img.naturalWidth || img.width
+          canvas.height = img.naturalHeight || img.height
+          const ctx = canvas.getContext('2d')
+          if (!ctx) {
+            resolve(FRIEREN_ART)
+            return
+          }
+          ctx.drawImage(img, 0, 0)
+          resolve(canvas.toDataURL('image/png'))
+        } catch {
+          resolve(FRIEREN_ART)
+        }
+      }
+      img.onerror = () => resolve(FRIEREN_ART)
+      img.src = FRIEREN_ART
+    })
+  }
+  return frierenStillPromise
+}
+
+function useFrierenStill() {
+  const [stillSrc, setStillSrc] = useState(null)
+  useEffect(() => {
+    let cancelled = false
+    loadFrierenStill().then((src) => {
+      if (!cancelled) setStillSrc(src)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  return stillSrc
 }
 
 function TitleButtons() {
@@ -40,13 +79,36 @@ function TitleButtons() {
   )
 }
 
+/** Animated GIF while speaking; frozen first frame otherwise. */
+function FrierenPortrait({ playing, className, alt }) {
+  const stillSrc = useFrierenStill()
+  const src = playing ? FRIEREN_ART : stillSrc || FRIEREN_ART
+
+  return (
+    <img
+      key={playing ? 'playing' : 'paused'}
+      className={className}
+      src={src}
+      alt={alt}
+    />
+  )
+}
+
 function Taskbar() {
+  const frierenStill = useFrierenStill()
+  const icons = [
+    { src: `${BG_DIR}/icon_home.png`, label: 'Start' },
+    { src: `${BG_DIR}/icon_internet_explorer.png`, label: 'Internet Explorer' },
+    { src: `${BG_DIR}/icon_file_explorer.png`, label: 'File Explorer' },
+    { src: frierenStill, label: 'Frieren - Grimoire' },
+  ]
+
   return (
     <nav className="taskbar" aria-label="Windows taskbar">
       <div className="taskbar-icons">
-        {TASKBAR_ICONS.map((icon) => (
+        {icons.map((icon) => (
           <button
-            key={icon.src}
+            key={icon.label}
             type="button"
             className="taskbar-icon"
             title={icon.label}
@@ -54,7 +116,9 @@ function Taskbar() {
             tabIndex={-1}
             onClick={(e) => e.preventDefault()}
           >
-            <img src={icon.src} alt="" width="32" height="32" />
+            {icon.src ? (
+              <img src={icon.src} alt="" width="32" height="32" />
+            ) : null}
           </button>
         ))}
       </div>
@@ -84,6 +148,9 @@ function useChatBridge() {
   const [line, setLine] = useState(null)
   const [status, setStatus] = useState('connecting')
   const [statusDetail, setStatusDetail] = useState('')
+  // Sticky until the next user turn; server "listening" right after an error
+  // would otherwise hide it almost instantly.
+  const [lastError, setLastError] = useState('')
   const retryRef = useRef(1000)
   const audioRef = useRef(null)
   const objectUrlRef = useRef(null)
@@ -104,6 +171,19 @@ function useChatBridge() {
       }
     }
 
+    const fail = (detail) => {
+      setStatus('error')
+      setStatusDetail(detail)
+      setLastError(detail)
+    }
+
+    // Tells the server it can start listening again (it mutes the mic while we play).
+    const sendPlaybackDone = () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'playback_done' }))
+      }
+    }
+
     const playMp3Base64 = (b64) => {
       stopAudio()
       try {
@@ -121,21 +201,22 @@ function useChatBridge() {
         audio.onended = () => {
           stopAudio()
           setStatus((s) => (s === 'speaking' ? 'ready' : s))
+          sendPlaybackDone()
         }
         audio.onerror = () => {
           stopAudio()
-          setStatus('error')
-          setStatusDetail('Audio playback failed')
+          fail('Audio playback failed')
+          sendPlaybackDone()
         }
         void audio.play().catch((err) => {
           stopAudio()
-          setStatus('error')
-          setStatusDetail(err?.message || 'Audio play blocked')
+          fail(err?.message || 'Audio play blocked')
+          sendPlaybackDone()
         })
       } catch (err) {
         stopAudio()
-        setStatus('error')
-        setStatusDetail(err?.message || 'Invalid audio payload')
+        fail(err?.message || 'Invalid audio payload')
+        sendPlaybackDone()
       }
     }
 
@@ -163,6 +244,7 @@ function useChatBridge() {
           return
         }
         if (data.type === 'chat' && data.text) {
+          if (data.who === 'you') setLastError('')
           setLine({ who: data.who === 'you' ? 'you' : 'frieren', text: data.text })
         } else if (data.type === 'audio' && data.data) {
           playMp3Base64(data.data)
@@ -173,6 +255,7 @@ function useChatBridge() {
           }
           setStatus(data.value)
           setStatusDetail(data.detail || '')
+          if (data.value === 'error') setLastError(data.detail || 'Unknown error')
         }
       }
 
@@ -199,11 +282,12 @@ function useChatBridge() {
     }
   }, [])
 
-  return { line, status, statusDetail }
+  return { line, status, statusDetail, lastError }
 }
 
 function App() {
-  const { line, status, statusDetail } = useChatBridge()
+  const { line, status, statusDetail, lastError } = useChatBridge()
+  const frierenStill = useFrierenStill()
   const [pos, setPos] = useState(null)
   const [size, setSize] = useState(null)
   const dragRef = useRef(null)
@@ -343,7 +427,7 @@ function App() {
         tabIndex={-1}
         onClick={(e) => e.preventDefault()}
       >
-        <img src="/recycle_bin.webp" alt="" width="48" height="48" />
+        <img src={`${BG_DIR}/recycle_bin.webp`} alt="" width="48" height="48" />
         <span>Recycle Bin</span>
       </button>
 
@@ -362,7 +446,9 @@ function App() {
           onPointerCancel={onTitlePointerUp}
         >
           <div className="title-left">
-            <img className="title-icon" src="/frieren.gif" alt="" width="16" height="16" />
+            {frierenStill ? (
+              <img className="title-icon" src={frierenStill} alt="" width="16" height="16" />
+            ) : null}
             <span className="title-text">Frieren - Grimoire</span>
           </div>
           <TitleButtons />
@@ -370,9 +456,9 @@ function App() {
 
         <div className="client">
           <div className="stage" aria-live="polite">
-            <img
+            <FrierenPortrait
               className="vn-art"
-              src="/frieren.gif"
+              playing={status === 'speaking'}
               alt="Frieren"
             />
 
@@ -389,7 +475,9 @@ function App() {
           <span className="status-cell" title={statusDetail || undefined}>
             {statusLabel}
           </span>
-          <span className="status-cell status-right">Local companion</span>
+          <span className="status-cell status-right" title={lastError || undefined}>
+            {lastError ? `Last error: ${lastError}` : 'Voice companion'}
+          </span>
         </footer>
 
         {RESIZE_HANDLES.map((dir) => (
