@@ -1,0 +1,84 @@
+---
+description: cs576 voice-to-voice companion: project overview and architecture decisions
+alwaysApply: true
+---
+
+# Project: Hosted AI Voice-to-Voice Companion (cs576 group 10)
+
+## Goal
+An AI voice-to-voice companion. No local models: every AI step (speech-to-text, chat, embeddings) runs on a hosted API. ElevenLabs provides TTS. Avatar/lipsync rendering is out of scope for now (see TBD).
+
+## Character
+**TODO: choose a character.**
+
+- The persona prompt lives in `server/soul`, which currently still holds the Shiori persona inherited from soul_shiori.
+- Places that still name Shiori and need renaming once a character is picked:
+  - WebSocket protocol: `who: "shiori"` (placeholder until this TODO is resolved)
+  - `client/src/App.jsx` labels and assets (`shiori.gif`, `shiori_still.jpg`, the "Shiori - Archive" title)
+  - `client/index.html`
+  - module docstrings across `server/`
+
+## Stack decisions (target vs current)
+
+Do not re-litigate these choices unless there's a real problem. The **target** stack below is the planned end state; the **current** notes reflect the cloned soul_shiori code, which has not been migrated yet.
+
+- **Speech-to-text (target)**: OpenAI `gpt-4o-mini-transcribe` (or `whisper-1`) via the `openai` SDK. Upload each utterance as an in-memory WAV. Keep the RMS energy-threshold VAD in `speechToText.py` for turn-taking (utterance start/stop). Remove CUDA DLL preload helpers and `faster-whisper`.
+  - **Current**: `faster-whisper`, model `large-v3-turbo`, `device="cuda"`, `compute_type="float16"`. Turn-taking is RMS energy-threshold VAD (not a native VAD library — `webrtcvad` has no Python 3.14 wheels and is unmaintained).
+
+- **Chat generation (target)**: OpenAI chat model (mini tier) via the `openai` SDK. Env: `OPENAI_API_KEY`, `LLM_MODEL`. Length presets map `num_predict` → `max_tokens`. Drop `ensure_ollama_server`, `preload_model`, `keep_alive`, and `think`. Keep the `LocalModel.start()` / `.ask()` interface (rename optional) so `voice_chat.py` needs little or no change. Note: OpenAI moderates output, which may change persona behavior versus the previous uncensored local model.
+  - **Current**: local LLM via Ollama (`http://localhost:11434`), model `hf.co/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive:Q6_K`.
+
+- **Embeddings (target)**: OpenAI `text-embedding-3-small` with `dimensions=768`, so the Supabase `vector(768)` column and `match_memory` RPC stay unchanged. Existing `chat_memory` rows were embedded with nomic and **must be truncated or re-embedded** before semantic search is reliable.
+  - **Current**: local Ollama `nomic-embed-text` (768-d).
+
+- **Rolling summary**: the summarizer call in `chat_memory.py` (currently hits `OLLAMA_CHAT_URL` directly) switches to the same OpenAI chat helper used for replies.
+
+- **TTS**: ElevenLabs REST `text-to-speech` in `server/elevenlabs_tts.py` (character replies only). Env: `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` in `server/.env`. MP3 is base64-broadcast on the chat WS (`type: audio`) and played in the React client. Streaming websocket TTS is a future upgrade.
+
+- **Bridge**: custom orchestrator / harness (Python) that clients connect to via WebSocket. Chosen over a folder-watch approach so the connection can carry more than audio later (expressions, status, interrupts).
+
+- **Chat memory (Supabase)**: four-tier schema already live — `key_facts`, `rolling_summary`, `chat_memory` (`vector(768)` + HNSW), `recent_turns`, plus RPC `match_memory`. API in `chat_memory.py` (`store_turn`, `should_retrieve_memory`, `build_light_context` / `build_full_context`, `build_context_if_needed`, `prune_recent_turns`, etc.). Selective retrieval: heuristic gate skips semantic search on filler/chatty turns; light context = facts + summary (session-cached) + recent turns; full context adds `retrieve_relevant`. Wired into `voice_chat.py`: `build_context_if_needed` each turn (logs `(memory: light|full)`), turns stored after each reply, prune every 10 assistant turns (invalidates light cache). Env: `SUPABASE_URL` (project root, no `/rest/v1`), `SUPABASE_SERVICE_ROLE_KEY`.
+
+## Architecture (target)
+```
+Mic → RMS VAD → OpenAI STT → text
+→ OpenAI chat (+ Supabase memory context) → text reply
+→ ElevenLabs TTS API → audio bytes
+→ WebSocket broadcast (chat UI bridge, localhost:8766)
+→ React client (VN textbox + MP3 playback)
+```
+
+## Message protocol (WebSocket, JSON)
+Chat UI bridge (live, localhost:8766 via `server/chat_bridge.py`, started by `voice_chat.py`):
+```json
+{"type": "chat", "who": "you", "text": "..."}
+{"type": "chat", "who": "shiori", "text": "..."}
+{"type": "audio", "format": "mp3", "data": "<base64>"}
+{"type": "status", "value": "listening"}
+{"type": "status", "value": "thinking"}
+{"type": "status", "value": "speaking"}
+{"type": "status", "value": "ready"}
+{"type": "status", "value": "error", "detail": "..."}
+```
+`who: "shiori"` is a **placeholder** until the character TODO is resolved. The Vite client proxies `/ws` → `ws://127.0.0.1:8766`, live-replaces the VN textbox on each `chat` event, and plays `audio` MP3 for the character. Mic capture remains in Python; STT/TTS run via hosted APIs before the character `chat`+`audio` emit.
+
+Every future feature should be a new `type` value, not a new connection or transport.
+
+## Known unresolved items / caveats
+- **OpenAI migration is planned, not yet implemented.** Code still uses Ollama + faster-whisper + nomic embeddings.
+- Existing nomic embeddings in `chat_memory` need clearing/re-embedding after the embeddings switch.
+- Dependency changes when migrating: remove `faster-whisper`, add `openai`. Package installs require explicit user confirmation (workspace rule).
+- ElevenLabs streaming websocket endpoint has not been integrated yet; current path uses full-clip REST TTS (`elevenlabs_tts.py`) then WS `audio` to the UI.
+- The mic-to-LLM harness is split across `server/voice_chat.py` (entry/loop), `speechToText.py`, `local_model.py`, `elevenlabs_tts.py`, and `chat_bridge.py` (WS :8766 to the React UI). It is not yet wired into `orchestrator.py`.
+- `key_facts` are read by light/full context builders but not auto-written yet (manual / future extractor).
+
+## Environment notes
+- Windows desktop
+- Env vars (target): `OPENAI_API_KEY`, `LLM_MODEL`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+
+## Immediate next steps
+1. Migrate speech-to-text, chat, and embeddings to OpenAI — files: `speechToText.py`, `local_model.py`, `chat_memory.py`, `requirements.txt`. Truncate or re-embed `chat_memory` after the embeddings change.
+2. Choose a character (persona in `server/soul`, UI labels/assets, WS `who` value).
+
+## TBD (out of scope for now)
+- **Avatar / 3D rendering / lipsync**: previously planned around Warudo (WebSocket bridge on :8765, `WarudoBridgeAsset.cs`, audio-based lipsync node). Warudo is **not part of the project anymore**. Revisit avatar/lipsync tooling later if needed; do not treat Warudo, its SDK, or the old Warudo bridge as active work.
