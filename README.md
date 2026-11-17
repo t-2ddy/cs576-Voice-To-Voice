@@ -97,7 +97,7 @@ Each item should produce a before/after number; N1 is the measuring tool for the
 2. **Client deps:** `cd client && npm install`
 3. **Supabase:** create a project, then run `supabase/schema.sql` in the SQL Editor. Optionally run `supabase/seed_key_facts.sql` for Frieren lore facts.
 4. **Keys:** copy `server/.env.example` to `server/.env` and fill it in (never commit `server/.env`):
-   - `OPENAI_API_KEY`, `LLM_MODEL` (e.g. `gpt-5.4-mini`), optional `STT_MODEL`
+   - `OPENAI_API_KEY`, `LLM_MODEL` (e.g. `gpt-5.6-luna`), optional `LLM_REASONING_EFFORT` (default `none`), optional `STT_MODEL`
    - `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`
    - `SUPABASE_URL` (`https://<project-ref>.supabase.co`), `SUPABASE_SERVICE_ROLE_KEY` (secret key)
 

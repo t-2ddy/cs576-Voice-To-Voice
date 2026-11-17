@@ -17,7 +17,7 @@ Do not re-litigate these choices unless there's a real problem. The OpenAI migra
 
 - **Speech-to-text**: OpenAI `STT_MODEL` (default `gpt-4o-mini-transcribe`; `whisper-1` also works) via the `openai` SDK. Each utterance is uploaded as an in-memory WAV. Turn-taking is the RMS energy-threshold VAD in `speechToText.py` (not a native VAD library — `webrtcvad` has no Python 3.14 wheels and is unmaintained). `faster-whisper` and the CUDA DLL helpers are removed.
 
-- **Chat generation**: OpenAI chat model (mini tier, non-reasoning) via the `openai` SDK in `local_model.py`. Env: `OPENAI_API_KEY`, `LLM_MODEL` (required). Length presets set `max_completion_tokens`. `LocalModel.start()` verifies the key and model; `.ask()` sends the turn; `complete_chat()` is the shared helper. Note: OpenAI moderates output, which may change persona behavior versus the previous uncensored local model.
+- **Chat generation**: OpenAI `gpt-5.6-luna` with reasoning off (`reasoning_effort="none"`, set by `LLM_REASONING_EFFORT`, default `none`) via the `openai` SDK in `local_model.py`. Reasoning tokens would count against `max_completion_tokens` and empty out the short replies. Env: `OPENAI_API_KEY`, `LLM_MODEL` (required), optional `LLM_REASONING_EFFORT`. Length presets set `max_completion_tokens`. `LocalModel.start()` verifies the key and model; `.ask()` sends the turn; `complete_chat()` is the shared helper. Note: OpenAI moderates output, which may change persona behavior versus the previous uncensored local model.
 
 - **Embeddings**: OpenAI `text-embedding-3-small` with `dimensions=768`, so the Supabase `vector(768)` column and `match_memory` RPC stay unchanged.
 
@@ -98,7 +98,7 @@ N = networking feature, numbered by priority. Every item should produce a before
 ## Environment notes
 - Windows desktop
 - Python 3.14
-- Env vars (template in `server/.env.example`): `OPENAI_API_KEY`, `LLM_MODEL`, optional `STT_MODEL`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (plus optional `ELEVENLABS_MODEL_ID` / voice-setting overrides), `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+- Env vars (template in `server/.env.example`): `OPENAI_API_KEY`, `LLM_MODEL`, optional `LLM_REASONING_EFFORT`, optional `STT_MODEL`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (plus optional `ELEVENLABS_MODEL_ID` / voice-setting overrides), `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 
 ## Immediate next steps
 1. Run an end-to-end test (`python voice_chat.py` in `server/` + `npm run dev` in `client/`); tune VAD/turn-taking (threshold, `SILENCE_END_MS`) and check half-duplex muting with speakers.

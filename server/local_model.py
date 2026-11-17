@@ -2,7 +2,8 @@
 
 Env (server/.env):
   OPENAI_API_KEY
-  LLM_MODEL  (OpenAI chat model id, e.g. a mini-tier model)
+  LLM_MODEL  (OpenAI chat model id, e.g. gpt-5.6-luna)
+  LLM_REASONING_EFFORT  (optional, default "none"; empty omits the parameter)
 """
 
 import os
@@ -13,6 +14,9 @@ from openai import OpenAIError
 from openai_client import get_openai_client
 
 LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
+# Reasoning tokens count against max_completion_tokens, so the small length
+# presets below would yield empty replies with reasoning on.
+LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "none").strip()
 
 # Most turns stay short/chatty; rare longer replies for variety.
 LENGTH_PRESETS = [
@@ -39,6 +43,8 @@ def complete_chat(messages: list[dict], max_tokens: int | None = None) -> str:
     if not LLM_MODEL:
         raise RuntimeError("Missing LLM_MODEL in server/.env")
     kwargs = {"model": LLM_MODEL, "messages": messages}
+    if LLM_REASONING_EFFORT:
+        kwargs["reasoning_effort"] = LLM_REASONING_EFFORT
     if max_tokens is not None:
         kwargs["max_completion_tokens"] = max_tokens
     response = get_openai_client().chat.completions.create(**kwargs)
@@ -74,7 +80,7 @@ class LocalModel:
             get_openai_client().models.retrieve(LLM_MODEL)
         except OpenAIError as exc:
             raise RuntimeError(f"OpenAI rejected the key or model '{LLM_MODEL}': {exc}") from exc
-        print(f"OpenAI chat model ready: {LLM_MODEL}")
+        print(f"OpenAI chat model ready: {LLM_MODEL} (reasoning: {LLM_REASONING_EFFORT or 'default'})")
 
     def ask(self, history: list[dict]) -> str:
         return ask_openai(history)
