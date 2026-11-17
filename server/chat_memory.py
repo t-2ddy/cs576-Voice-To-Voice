@@ -141,7 +141,13 @@ def store_turn(speaker: str, content: str) -> None:
     ).execute()
 
 
-def get_recent_turns(limit: int = 10) -> list[dict]:
+# Must cover every row recent_turns can hold between prunes (keep_last=10 plus
+# 2 rows x PRUNE_EVERY_N_ASSISTANT_TURNS=10 in voice_chat.py), or turns drop out
+# of context before they are archived into chat_memory.
+RECENT_TURNS_LIMIT = 30
+
+
+def get_recent_turns(limit: int = RECENT_TURNS_LIMIT) -> list[dict]:
     """Return the latest turns in chronological order (oldest first)."""
     result = (
         get_supabase()
