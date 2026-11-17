@@ -73,7 +73,7 @@ Every future feature should be a new `type` value, not a new connection or trans
 - **Known inefficiencies to measure and fix**: MP3 is base64 inside JSON (~33% overhead); `elevenlabs_tts.py` uses `urllib`, so every call pays a fresh TCP + TLS handshake (the `openai` SDK reuses connections via httpx).
 
 ### Planned additions (priority order)
-Every item should produce a before/after number for the report; N1 is the measuring tool for the rest.
+N = networking feature, numbered by priority. Every item should produce a before/after number for the report; N1 is the measuring tool for the rest.
 
 | # | Item | Effort | What to measure / show |
 |---|---|---|---|

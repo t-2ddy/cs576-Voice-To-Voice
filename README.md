@@ -15,7 +15,7 @@ A real-time AI voice companion: you talk into the mic, **Frieren** (an elf mage 
 - ✅ Client reconnect with exponential backoff (×1.5, max 10 s)
 - ✅ WebSocket keepalive pings (library default, every 20 s)
 
-**Planned**
+**Planned** (N = networking feature, numbered by priority)
 - ⬜ N1 Latency instrumentation per pipeline stage + RTT, network panel in UI
 - ⬜ N2 Binary WS frames (drop base64 overhead) + HTTP connection reuse
 - ⬜ N3 Streaming TTS, audio chunks forwarded over the WS
