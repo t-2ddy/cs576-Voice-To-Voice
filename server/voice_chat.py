@@ -20,9 +20,18 @@ Compartmentalized into:
 See .cursor/rules/voice-to-voice.mdc for the overall architecture.
 """
 
+import os
 import sys
+import time
 
-from chat_bridge import emit_audio, emit_chat, emit_status, start_chat_bridge, wait_for_playback
+from chat_bridge import (
+    emit_audio,
+    emit_chat,
+    emit_status,
+    start_chat_bridge,
+    wait_for_client,
+    wait_for_playback,
+)
 from chat_memory import build_context_if_needed, prune_recent_turns, store_turn
 from elevenlabs_tts import extract_spoken_text, synthesize
 from local_model import LocalModel
@@ -34,6 +43,28 @@ PRUNE_EVERY_N_ASSISTANT_TURNS = 10
 # the UI never reports playback_done (tab closed, autoplay blocked, etc.).
 MP3_BYTES_PER_SECOND = 16_000
 PLAYBACK_GRACE_SECONDS = 3.0
+# 0 = wait for the browser UI until it connects (Ctrl+C to quit); >0 = give up
+# after that many seconds and run terminal-only.
+UI_WAIT_SECONDS = float(os.getenv("UI_WAIT_SECONDS", "0") or 0)
+UI_WAIT_REMINDER_SECONDS = 15.0
+
+
+def _wait_for_ui() -> None:
+    print("Waiting for UI at http://localhost:5173 (open or focus the tab) ...")
+    started = time.monotonic()
+    next_reminder = started + UI_WAIT_REMINDER_SECONDS
+    # Short slices keep Ctrl+C responsive on Windows.
+    while UI_WAIT_SECONDS <= 0 or time.monotonic() - started < UI_WAIT_SECONDS:
+        if wait_for_client(0.5):
+            print("UI connected.")
+            return
+        if time.monotonic() >= next_reminder:
+            print("(still waiting for UI; is http://localhost:5173 open?)", file=sys.stderr)
+            next_reminder += UI_WAIT_REMINDER_SECONDS
+    print(
+        f"(no UI connected after {UI_WAIT_SECONDS:.0f}s; continuing in terminal-only mode)",
+        file=sys.stderr,
+    )
 
 
 def _build_ask_history(persona: str, context: str, user_text: str) -> list[dict]:
@@ -53,6 +84,11 @@ def _build_ask_history(persona: str, context: str, user_text: str) -> list[dict]
 def main() -> None:
     start_chat_bridge()
     print("Chat UI bridge listening on ws://127.0.0.1:8766")
+    try:
+        _wait_for_ui()
+    except KeyboardInterrupt:
+        print("\nExiting.")
+        return
 
     local_model = LocalModel()
     try:

@@ -32,10 +32,10 @@ def _env_bool(name: str, default: bool) -> bool:
         return default
     return raw in ("1", "true", "yes", "on")
 
-ELEVENLABS_STABILITY = _env_float("ELEVENLABS_STABILITY", 0.3)
-ELEVENLABS_SIMILARITY_BOOST = _env_float("ELEVENLABS_SIMILARITY_BOOST", 0.4)
-ELEVENLABS_STYLE = _env_float("ELEVENLABS_STYLE", 0.2)
-ELEVENLABS_SPEED = _env_float("ELEVENLABS_SPEED", 1.0)
+ELEVENLABS_STABILITY = _env_float("ELEVENLABS_STABILITY", 0.75)
+ELEVENLABS_SIMILARITY_BOOST = _env_float("ELEVENLABS_SIMILARITY_BOOST", 0.85)
+ELEVENLABS_STYLE = _env_float("ELEVENLABS_STYLE", 0.1)
+ELEVENLABS_SPEED = _env_float("ELEVENLABS_SPEED", 0.8)
 ELEVENLABS_SPEAKER_BOOST = _env_bool("ELEVENLABS_SPEAKER_BOOST", True)
 
 TTS_URL_TEMPLATE = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"

@@ -144,6 +144,47 @@ function clampSize(width, height) {
   }
 }
 
+// Background tabs throttle main-thread timers to ~1/min; worker timers keep firing,
+// so reconnect retries still land while the user is in another window.
+function createWorkerTimer() {
+  try {
+    const src =
+      'let t; onmessage = (e) => { clearTimeout(t); if (e.data >= 0) t = setTimeout(() => postMessage(0), e.data) }'
+    const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }))
+    const worker = new Worker(url)
+    URL.revokeObjectURL(url)
+    let callback = null
+    worker.onmessage = () => callback?.()
+    return {
+      set(fn, ms) {
+        callback = fn
+        worker.postMessage(ms)
+      },
+      clear() {
+        callback = null
+        worker.postMessage(-1)
+      },
+      dispose() {
+        worker.terminate()
+      },
+    }
+  } catch {
+    let t
+    return {
+      set(fn, ms) {
+        clearTimeout(t)
+        t = setTimeout(fn, ms)
+      },
+      clear() {
+        clearTimeout(t)
+      },
+      dispose() {
+        clearTimeout(t)
+      },
+    }
+  }
+}
+
 function useChatBridge() {
   const [line, setLine] = useState(null)
   const [status, setStatus] = useState('connecting')
@@ -154,11 +195,13 @@ function useChatBridge() {
   const retryRef = useRef(1000)
   const audioRef = useRef(null)
   const objectUrlRef = useRef(null)
+  const pendingAudioRef = useRef(null)
+  const audioUnlockedRef = useRef(false)
 
   useEffect(() => {
     let ws
     let closed = false
-    let timer
+    const retryTimer = createWorkerTimer()
 
     const stopAudio = () => {
       if (audioRef.current) {
@@ -184,8 +227,23 @@ function useChatBridge() {
       }
     }
 
+    const unlockAudio = () => {
+      if (audioUnlockedRef.current) return
+      audioUnlockedRef.current = true
+      try {
+        const silent = new Audio(
+          'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=',
+        )
+        silent.volume = 0.01
+        void silent.play().catch(() => {})
+      } catch {
+        /* ignore unlock failures; gesture still counts for later play() */
+      }
+    }
+
     const playMp3Base64 = (b64) => {
       stopAudio()
+      pendingAudioRef.current = null
       try {
         const binary = atob(b64)
         const bytes = new Uint8Array(binary.length)
@@ -200,15 +258,28 @@ function useChatBridge() {
         setStatus('speaking')
         audio.onended = () => {
           stopAudio()
+          pendingAudioRef.current = null
           setStatus((s) => (s === 'speaking' ? 'ready' : s))
           sendPlaybackDone()
         }
         audio.onerror = () => {
           stopAudio()
+          pendingAudioRef.current = null
           fail('Audio playback failed')
           sendPlaybackDone()
         }
         void audio.play().catch((err) => {
+          const blocked =
+            err?.name === 'NotAllowedError' ||
+            /not allowed|user.*denied|interact/i.test(err?.message || '')
+          if (blocked) {
+            // Keep the clip; next user gesture will replay it.
+            pendingAudioRef.current = b64
+            setStatus('error')
+            setStatusDetail('Click the window to enable audio')
+            setLastError('Click the window to enable audio')
+            return
+          }
           stopAudio()
           fail(err?.message || 'Audio play blocked')
           sendPlaybackDone()
@@ -222,6 +293,13 @@ function useChatBridge() {
 
     const connect = () => {
       if (closed) return
+      retryTimer.clear()
+      if (
+        ws &&
+        (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
+      ) {
+        return
+      }
       setStatus((s) =>
         s === 'ready' || s === 'listening' || s === 'thinking' || s === 'speaking'
           ? s
@@ -263,8 +341,8 @@ function useChatBridge() {
         if (closed) return
         setStatus('offline')
         const delay = retryRef.current
-        retryRef.current = Math.min(delay * 1.5, 10_000)
-        timer = setTimeout(connect, delay)
+        retryRef.current = Math.min(delay * 1.5, 2_000)
+        retryTimer.set(connect, delay)
       }
 
       ws.onerror = () => {
@@ -272,12 +350,44 @@ function useChatBridge() {
       }
     }
 
+    const reconnectSoon = () => {
+      if (closed) return
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        return
+      }
+      retryTimer.clear()
+      retryRef.current = 1000
+      connect()
+    }
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') reconnectSoon()
+    }
+
+    const onUserGesture = () => {
+      unlockAudio()
+      const pending = pendingAudioRef.current
+      if (pending) {
+        pendingAudioRef.current = null
+        playMp3Base64(pending)
+      }
+    }
+
     connect()
+    window.addEventListener('focus', reconnectSoon)
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pointerdown', onUserGesture)
+    window.addEventListener('keydown', onUserGesture)
 
     return () => {
       closed = true
-      clearTimeout(timer)
+      retryTimer.dispose()
       stopAudio()
+      pendingAudioRef.current = null
+      window.removeEventListener('focus', reconnectSoon)
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pointerdown', onUserGesture)
+      window.removeEventListener('keydown', onUserGesture)
       if (ws) ws.close()
     }
   }, [])
