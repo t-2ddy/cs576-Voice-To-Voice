@@ -35,12 +35,18 @@ def _env_bool(name: str, default: bool) -> bool:
 ELEVENLABS_STABILITY = _env_float("ELEVENLABS_STABILITY", 0.75)
 ELEVENLABS_SIMILARITY_BOOST = _env_float("ELEVENLABS_SIMILARITY_BOOST", 0.85)
 ELEVENLABS_STYLE = _env_float("ELEVENLABS_STYLE", 0.1)
-ELEVENLABS_SPEED = _env_float("ELEVENLABS_SPEED", 0.8)
+ELEVENLABS_SPEED = _env_float("ELEVENLABS_SPEED", .9)
 ELEVENLABS_SPEAKER_BOOST = _env_bool("ELEVENLABS_SPEAKER_BOOST", True)
 
 TTS_URL_TEMPLATE = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 _NARRATION_RE = re.compile(r"\*\*[^*]+\*\*")
 _SPOKEN_RE = re.compile(r'"([^"]+)"')
+# Phonetic alias for TTS only; UI still shows "Frieren".
+_FRIEREN_RE = re.compile(r"\bFrieren\b", re.IGNORECASE)
+
+
+def _for_tts(text: str) -> str:
+    return _FRIEREN_RE.sub("Free-ren", text)
 
 
 def extract_spoken_text(reply: str) -> str:
@@ -50,8 +56,10 @@ def extract_spoken_text(reply: str) -> str:
     text = _NARRATION_RE.sub(" ", reply)
     parts = [p.strip() for p in _SPOKEN_RE.findall(text) if p.strip()]
     if parts:
-        return " ".join(parts)
-    return " ".join(text.split()).strip()
+        spoken = " ".join(parts)
+    else:
+        spoken = " ".join(text.split()).strip()
+    return _for_tts(spoken)
 def synthesize(
     text: str,
     stability: float | None = None,

@@ -10,6 +10,10 @@ export default defineConfig({
         target: 'ws://127.0.0.1:8766',
         ws: true,
       },
+      '/bridge-health': {
+        target: 'http://127.0.0.1:8766',
+        rewrite: () => '/health',
+      },
     },
   },
 })

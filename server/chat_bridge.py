@@ -17,10 +17,12 @@ import json
 import sys
 import threading
 import time
+from http import HTTPStatus
 from typing import Any
 
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
+from websockets.http11 import Request, Response
 
 CHAT_WS_HOST = "127.0.0.1"
 CHAT_WS_PORT = 8766
@@ -28,6 +30,8 @@ CHAT_WS_PORT = 8766
 _clients: set[ServerConnection] = set()
 _loop: asyncio.AbstractEventLoop | None = None
 _thread: threading.Thread | None = None
+_server_ready = threading.Event()
+_start_error: BaseException | None = None
 _lock = threading.Lock()
 _playback_done = threading.Event()
 _client_connected = threading.Event()
@@ -161,18 +165,33 @@ def emit_status(value: str, detail: str | None = None) -> None:
     broadcast(event)
 
 
+def _process_request(connection: ServerConnection, request: Request) -> Response | None:
+    """Plain-HTTP health check so the UI can probe without opening a WebSocket."""
+    if request.path.split("?", 1)[0] == "/health":
+        return connection.respond(HTTPStatus.OK, "ok\n")
+    return None
+
+
 async def _run_server() -> None:
-    async with serve(_handler, CHAT_WS_HOST, CHAT_WS_PORT):
+    async with serve(
+        _handler,
+        CHAT_WS_HOST,
+        CHAT_WS_PORT,
+        process_request=_process_request,
+    ):
+        _server_ready.set()
         await asyncio.Future()  # run forever
 
 
 def _thread_main() -> None:
-    global _loop
+    global _loop, _start_error
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     _loop = loop
     try:
         loop.run_until_complete(_run_server())
+    except BaseException as exc:
+        _start_error = exc
     finally:
         _loop = None
         loop.close()
@@ -190,7 +209,11 @@ def start_chat_bridge() -> None:
             daemon=True,
         )
         _thread.start()
-    for _ in range(50):
-        if _loop is not None and _loop.is_running():
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if _server_ready.wait(0.05):
+            return
+        if not _thread.is_alive():
             break
-        time.sleep(0.02)
+    detail = f": {_start_error}" if _start_error else ""
+    raise RuntimeError(f"chat bridge failed to bind {CHAT_WS_HOST}:{CHAT_WS_PORT}{detail}")

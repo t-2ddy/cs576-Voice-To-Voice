@@ -82,7 +82,11 @@ def _build_ask_history(persona: str, context: str, user_text: str) -> list[dict]
 
 
 def main() -> None:
-    start_chat_bridge()
+    try:
+        start_chat_bridge()
+    except RuntimeError as exc:
+        print(f"Error: {exc} (is another voice_chat.py already running?)", file=sys.stderr)
+        sys.exit(1)
     print("Chat UI bridge listening on ws://127.0.0.1:8766")
     try:
         _wait_for_ui()

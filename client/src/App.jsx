@@ -10,13 +10,17 @@ const MIN_WIN_H = 280
 
 const RESIZE_HANDLES = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']
 
+const HEALTH_POLL_MS = 1000
+const HEALTH_TIMEOUT_MS = 1500
+const CONNECT_TIMEOUT_MS = 4000
+
 const STATUS_LABELS = {
   listening: 'Listening...',
   thinking: 'Thinking...',
   speaking: 'Speaking...',
   ready: 'Ready',
   error: 'Error',
-  offline: 'Offline',
+  offline: 'Offline (backend not running)',
   connecting: 'Connecting...',
 }
 
@@ -192,15 +196,16 @@ function useChatBridge() {
   // Sticky until the next user turn; server "listening" right after an error
   // would otherwise hide it almost instantly.
   const [lastError, setLastError] = useState('')
-  const retryRef = useRef(1000)
   const audioRef = useRef(null)
   const objectUrlRef = useRef(null)
   const pendingAudioRef = useRef(null)
   const audioUnlockedRef = useRef(false)
 
   useEffect(() => {
-    let ws
+    let ws = null
     let closed = false
+    let probing = false
+    let connectStartedAt = 0
     const retryTimer = createWorkerTimer()
 
     const stopAudio = () => {
@@ -291,30 +296,85 @@ function useChatBridge() {
       }
     }
 
-    const connect = () => {
-      if (closed) return
-      retryTimer.clear()
-      if (
-        ws &&
-        (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
-      ) {
-        return
+    const isLive = () =>
+      ws &&
+      (ws.readyState === WebSocket.OPEN ||
+        (ws.readyState === WebSocket.CONNECTING &&
+          Date.now() - connectStartedAt < CONNECT_TIMEOUT_MS))
+
+    const dropSocket = () => {
+      if (!ws) return
+      const old = ws
+      ws = null
+      old.onopen = old.onmessage = old.onclose = old.onerror = null
+      try {
+        old.close()
+      } catch {
+        /* already closed */
       }
+    }
+
+    const scheduleProbe = (ms = HEALTH_POLL_MS) => {
+      if (!closed) retryTimer.set(probe, ms)
+    }
+
+    const goOffline = () => {
+      setStatus('offline')
+      setStatusDetail('Backend not running')
+    }
+
+    // Probe over plain HTTP first: browsers delay repeated failed WebSocket
+    // handshakes to one endpoint, which can stall reconnects for ~60s.
+    async function probe() {
+      if (closed || probing || isLive()) return
+      if (ws) dropSocket()
+      probing = true
+      const ctrl = new AbortController()
+      const abortTimer = setTimeout(() => ctrl.abort(), HEALTH_TIMEOUT_MS)
+      let up = false
+      try {
+        const res = await fetch('/bridge-health', { cache: 'no-store', signal: ctrl.signal })
+        up = res.ok
+      } catch {
+        up = false
+      } finally {
+        clearTimeout(abortTimer)
+        probing = false
+      }
+      if (closed || isLive()) return
+      if (up) {
+        openSocket()
+      } else {
+        goOffline()
+        scheduleProbe()
+      }
+    }
+
+    const openSocket = () => {
       setStatus((s) =>
         s === 'ready' || s === 'listening' || s === 'thinking' || s === 'speaking'
           ? s
           : 'connecting',
       )
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-      ws = new WebSocket(`${proto}://${window.location.host}/ws`)
+      const sock = new WebSocket(`${proto}://${window.location.host}/ws`)
+      ws = sock
+      connectStartedAt = Date.now()
+      retryTimer.set(() => {
+        if (ws === sock && sock.readyState === WebSocket.CONNECTING) {
+          dropSocket()
+          goOffline()
+          probe()
+        }
+      }, CONNECT_TIMEOUT_MS)
 
-      ws.onopen = () => {
-        retryRef.current = 1000
+      sock.onopen = () => {
+        retryTimer.clear()
         setStatus('ready')
         setStatusDetail('')
       }
 
-      ws.onmessage = (event) => {
+      sock.onmessage = (event) => {
         let data
         try {
           data = JSON.parse(event.data)
@@ -337,27 +397,23 @@ function useChatBridge() {
         }
       }
 
-      ws.onclose = () => {
-        if (closed) return
-        setStatus('offline')
-        const delay = retryRef.current
-        retryRef.current = Math.min(delay * 1.5, 2_000)
-        retryTimer.set(connect, delay)
+      sock.onclose = () => {
+        if (closed || ws !== sock) return
+        ws = null
+        retryTimer.clear()
+        goOffline()
+        scheduleProbe()
       }
 
-      ws.onerror = () => {
-        ws.close()
+      sock.onerror = () => {
+        sock.close()
       }
     }
 
     const reconnectSoon = () => {
-      if (closed) return
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-        return
-      }
+      if (closed || isLive()) return
       retryTimer.clear()
-      retryRef.current = 1000
-      connect()
+      probe()
     }
 
     const onVisibility = () => {
@@ -373,7 +429,7 @@ function useChatBridge() {
       }
     }
 
-    connect()
+    probe()
     window.addEventListener('focus', reconnectSoon)
     document.addEventListener('visibilitychange', onVisibility)
     window.addEventListener('pointerdown', onUserGesture)
@@ -388,7 +444,7 @@ function useChatBridge() {
       document.removeEventListener('visibilitychange', onVisibility)
       window.removeEventListener('pointerdown', onUserGesture)
       window.removeEventListener('keydown', onUserGesture)
-      if (ws) ws.close()
+      dropSocket()
     }
   }, [])
 
