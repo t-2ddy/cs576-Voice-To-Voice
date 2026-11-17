@@ -83,15 +83,27 @@ function TitleButtons() {
   )
 }
 
-/** Animated GIF while speaking; frozen first frame otherwise. */
+const PORTRAIT_FADE_OUT_MS = 320
+
+/** Animated GIF while speaking; frozen first frame once the fade-out finishes. */
 function FrierenPortrait({ playing, className, alt }) {
   const stillSrc = useFrierenStill()
-  const src = playing ? FRIEREN_ART : stillSrc || FRIEREN_ART
+  const [showGif, setShowGif] = useState(playing)
+
+  useEffect(() => {
+    if (playing) {
+      setShowGif(true)
+      return
+    }
+    const timer = setTimeout(() => setShowGif(false), PORTRAIT_FADE_OUT_MS)
+    return () => clearTimeout(timer)
+  }, [playing])
+
+  const src = showGif ? FRIEREN_ART : stillSrc || FRIEREN_ART
 
   return (
     <img
-      key={playing ? 'playing' : 'paused'}
-      className={className}
+      className={`${className}${playing ? ' is-speaking' : ''}`}
       src={src}
       alt={alt}
     />

@@ -244,6 +244,21 @@
   image-rendering: pixelated;
   display: block;
   pointer-events: none;
+  filter: brightness(0.45);
+  transition: filter 280ms ease;
+}
+
+.vn-art.is-speaking {
+  filter: brightness(1);
+  transition-duration: 480ms;
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vn-art,
+  .vn-art.is-speaking {
+    transition-duration: 80ms;
+  }
 }
 
 .vn-textbox {

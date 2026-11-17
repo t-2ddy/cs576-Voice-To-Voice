@@ -88,6 +88,8 @@ N = networking feature, numbered by priority. Every item should produce a before
 
 **Recommended scope**: core = N1 + N2 + N3; then N4 with N5 as the experiments section if time allows. Capture the WS handshake and frames in **Wireshark** for the report (loopback capture via Npcap).
 
+**Findings**: results go in `findings/`, one file per item (`N1-…md` to `N8-…md`, plus `00-baseline-e2e.md`, `wireshark-captures.md`, `decisions-log.md`). CSV logs go in `findings/data/` and captures in `findings/captures/`. See `findings/README.md` for conventions (n ≥ 10 turns, median + p90, same prompt script).
+
 ## Known unresolved items / caveats
 - Package installs require explicit user confirmation (workspace rule).
 - Current TTS path is full-clip REST (`elevenlabs_tts.py`) then one WS `audio` message; streaming is N3.
@@ -101,7 +103,7 @@ N = networking feature, numbered by priority. Every item should produce a before
 - Env vars (template in `server/.env.example`): `OPENAI_API_KEY`, `LLM_MODEL`, optional `LLM_REASONING_EFFORT`, optional `STT_MODEL`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (plus optional `ELEVENLABS_MODEL_ID` / voice-setting overrides), `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 
 ## Immediate next steps
-1. Run an end-to-end test (`python voice_chat.py` in `server/` + `npm run dev` in `client/`); tune VAD/turn-taking (threshold, `SILENCE_END_MS`) and check half-duplex muting with speakers.
+1. Run an end-to-end test (`python voice_chat.py` in `server/` + `npm run dev` in `client/`); tune VAD/turn-taking (threshold; `VAD_SILENCE_END_MS` set to 900) and check half-duplex muting with speakers. Record in `findings/00-baseline-e2e.md`.
 2. Start the networking core: N1 (latency instrumentation) first, then N2, then N3.
 3. Decide on fresh-chat-per-run (archive `recent_turns` at startup).
 
