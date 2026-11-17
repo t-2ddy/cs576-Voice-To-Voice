@@ -3,12 +3,15 @@
 Env (server/.env):
   OPENAI_API_KEY
   STT_MODEL  (optional, default gpt-4o-mini-transcribe; whisper-1 also works)
+  VAD_THRESHOLD_MULTIPLIER, VAD_MIN_THRESHOLD, VAD_START_FRAMES,
+  VAD_SILENCE_END_MS, VAD_MIN_UTTERANCE_SECONDS, VAD_DEBUG  (optional tuning)
 """
 
 import io
 import os
 import queue
 import sys
+import unicodedata
 import wave
 
 import numpy as np
@@ -16,21 +19,40 @@ import sounddevice as sd
 
 from openai_client import get_openai_client
 
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000
 
 CALIBRATION_SECONDS = 1.0
-SPEECH_THRESHOLD_MULTIPLIER = 3.0
-MIN_THRESHOLD = 200.0  # floor so a dead-silent room doesn't trigger on tiny noise
+SPEECH_THRESHOLD_MULTIPLIER = _env_float("VAD_THRESHOLD_MULTIPLIER", 3.0)
+# Floor so a dead-silent room doesn't trigger on tiny noise.
+MIN_THRESHOLD = _env_float("VAD_MIN_THRESHOLD", 200.0)
 
-SPEECH_START_FRAMES = 3  # consecutive loud frames needed to start recording
-SILENCE_END_MS = 800  # trailing silence needed to end an utterance
+SPEECH_START_FRAMES = int(_env_float("VAD_START_FRAMES", 3))  # consecutive loud frames to start
+SILENCE_END_MS = int(_env_float("VAD_SILENCE_END_MS", 800))  # trailing silence to end
 MAX_UTTERANCE_SECONDS = 30
 PRE_BUFFER_MS = 300  # kept before speech onset so the start of words isn't clipped
-MIN_UTTERANCE_SECONDS = 0.3  # discard shorter blips (coughs, clicks, etc.)
+# Discard shorter blips (coughs, clicks, etc.).
+MIN_UTTERANCE_SECONDS = _env_float("VAD_MIN_UTTERANCE_SECONDS", 0.3)
+VAD_DEBUG = os.getenv("VAD_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
 
 STT_MODEL = os.getenv("STT_MODEL", "gpt-4o-mini-transcribe").strip()
+STT_FALLBACK_MODEL = "whisper-1"
+STT_PROMPT = (
+    "English conversation with Frieren, an elf mage. "
+    "Names: Frieren, Fern, Stark, Himmel, Heiter, Eisen."
+)
 
 
 def rms(frame: np.ndarray) -> float:
@@ -73,19 +95,32 @@ def record_utterance(frame_queue: queue.Queue, threshold: float) -> np.ndarray |
 
     recorded = list(pre_buffer)
     silence_streak = 0
+    peak = max(rms(f) for f in recorded)
+    end_reason = "silence"
     while True:
         frame = frame_queue.get()
         recorded.append(frame)
 
-        silence_streak = 0 if rms(frame) >= threshold else silence_streak + 1
+        level = rms(frame)
+        peak = max(peak, level)
+        silence_streak = 0 if level >= threshold else silence_streak + 1
         if silence_streak >= silence_end_frames:
             break
         if len(recorded) >= max_frames:
             print("(max utterance length reached, cutting off)")
+            end_reason = "max length"
             break
 
     audio = np.concatenate(recorded)
-    if len(audio) / SAMPLE_RATE < MIN_UTTERANCE_SECONDS:
+    duration = len(audio) / SAMPLE_RATE
+    too_short = duration < MIN_UTTERANCE_SECONDS
+    if VAD_DEBUG:
+        reason = "too short, dropped" if too_short else end_reason
+        print(
+            f"(vad: {duration:.2f}s, peak RMS {peak:.0f}, threshold {threshold:.0f}, end: {reason})",
+            file=sys.stderr,
+        )
+    if too_short:
         return None
     return audio
 
@@ -101,13 +136,56 @@ def _to_wav_bytes(audio_int16: np.ndarray) -> bytes:
     return buffer.getvalue()
 
 
-def transcribe(audio_int16: np.ndarray) -> str:
+def _mostly_non_latin(text: str) -> bool:
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return False
+    non_latin = sum(1 for c in letters if not unicodedata.name(c, "").startswith("LATIN"))
+    return non_latin * 2 > len(letters)
+
+
+def _transcribe_with(model: str, wav: bytes) -> str:
     result = get_openai_client().audio.transcriptions.create(
-        model=STT_MODEL,
-        file=("utterance.wav", _to_wav_bytes(audio_int16), "audio/wav"),
+        model=model,
+        file=("utterance.wav", wav, "audio/wav"),
         language="en",
+        prompt=STT_PROMPT,
     )
     return result.text.strip()
+
+
+def _normalize(text: str) -> str:
+    return " ".join("".join(c.lower() if c.isalnum() else " " for c in text).split())
+
+
+_PROMPT_NORM = _normalize(STT_PROMPT)
+
+
+def _is_prompt_echo(text: str) -> bool:
+    """On noise/silence the model can return the vocabulary prompt verbatim."""
+    norm = _normalize(text)
+    return bool(norm) and len(norm) > 12 and norm in _PROMPT_NORM
+
+
+def transcribe(audio_int16: np.ndarray) -> str | None:
+    """Transcribe English speech; returns None for prompt echoes or non-English script."""
+    wav = _to_wav_bytes(audio_int16)
+    text = _transcribe_with(STT_MODEL, wav)
+    if _is_prompt_echo(text):
+        print("(dropped STT prompt echo; likely noise)", file=sys.stderr)
+        return None
+    if not _mostly_non_latin(text):
+        return text
+    if STT_MODEL != STT_FALLBACK_MODEL:
+        retry = _transcribe_with(STT_FALLBACK_MODEL, wav)
+        if _is_prompt_echo(retry):
+            print("(dropped STT prompt echo; likely noise)", file=sys.stderr)
+            return None
+        if not _mostly_non_latin(retry):
+            return retry
+        text = retry
+    print(f"(dropped non-English transcript: {text})", file=sys.stderr)
+    return None
 
 
 class SpeechToText:

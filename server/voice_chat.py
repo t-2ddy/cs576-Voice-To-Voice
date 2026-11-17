@@ -43,6 +43,8 @@ PRUNE_EVERY_N_ASSISTANT_TURNS = 10
 # the UI never reports playback_done (tab closed, autoplay blocked, etc.).
 MP3_BYTES_PER_SECOND = 16_000
 PLAYBACK_GRACE_SECONDS = 3.0
+# Speaker tail / room echo still reaches the mic briefly after playback_done.
+ECHO_TAIL_SECONDS = float(os.getenv("ECHO_TAIL_SECONDS", "0.3") or 0)
 # 0 = wait for the browser UI until it connects (Ctrl+C to quit); >0 = give up
 # after that many seconds and run terminal-only.
 UI_WAIT_SECONDS = float(os.getenv("UI_WAIT_SECONDS", "0") or 0)
@@ -101,6 +103,13 @@ def main() -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    # Each session starts fresh; past turns stay recallable via chat_memory + summary.
+    print("Archiving previous conversation...")
+    try:
+        prune_recent_turns(keep_last=0)
+    except Exception as exc:
+        print(f"(startup archive failed: {exc})", file=sys.stderr)
+
     persona = local_model.system_prompt
     assistant_turns = 0
 
@@ -150,7 +159,8 @@ def main() -> None:
                     # Half-duplex: don't listen while the reply plays, or the mic
                     # hears Frieren through the speakers and she answers herself.
                     timeout = len(mp3) / MP3_BYTES_PER_SECOND + PLAYBACK_GRACE_SECONDS
-                    wait_for_playback(timeout)
+                    if wait_for_playback(timeout) and ECHO_TAIL_SECONDS > 0:
+                        time.sleep(ECHO_TAIL_SECONDS)
                     stt.flush()
                 else:
                     emit_chat("frieren", reply)

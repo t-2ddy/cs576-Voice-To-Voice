@@ -372,7 +372,8 @@ def prune_recent_turns(keep_last: int = 10) -> None:
     if not turns or len(turns) <= keep_last:
         return
 
-    overflow = turns[keep_last:]
+    # Fetched newest-first; summarize oldest-first so the summary reads chronologically.
+    overflow = list(reversed(turns[keep_last:]))
     overflow_ids = [t["id"] for t in overflow]
 
     for turn in overflow:

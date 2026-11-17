@@ -46,7 +46,7 @@ _FRIEREN_RE = re.compile(r"\bFrieren\b", re.IGNORECASE)
 
 
 def _for_tts(text: str) -> str:
-    return _FRIEREN_RE.sub("Free-ren", text)
+    return _FRIEREN_RE.sub("FreeRen", text)
 
 
 def extract_spoken_text(reply: str) -> str:
