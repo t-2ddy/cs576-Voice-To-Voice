@@ -21,8 +21,8 @@ A real-time AI voice companion: you talk into the mic, **Frieren** (an elf mage 
 - ✅ N3 Streaming TTS + streaming model text, audio chunks forwarded over the WS (3309 ms, −366 ms / −10% since N1)
 
 **Planned**
-- ⬜ N5 Experiments under simulated latency / loss (next; test plan in `findings/N5-network-conditions.md`)
 - ⬜ N4 Browser mic → server real-time audio streaming (code built, not measured)
+- ⬜ N5 Experiments under simulated latency / loss (next; test plan in `findings/N5-network-conditions.md`)
 - ⬜ N6 `wss://`, auth on handshake, Origin check, per-user sessions
 - ⬜ N7 Resilience: heartbeats, session resume, jittered retry on API errors
 - ⬜ N8 (stretch) WebSocket/TCP vs WebRTC/UDP comparison
