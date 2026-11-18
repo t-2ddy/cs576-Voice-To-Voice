@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Wireshark captures (plaintext WS / mic audio)
+findings/captures/*.pcapng
+findings/captures/*.pcap
