@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createBrowserMic } from './browserMic'
 import './App.css'
 
 const BG_DIR = '/images/background'
@@ -219,7 +220,49 @@ function useChatBridge() {
     let probing = false
     let connectStartedAt = 0
     let stream = null
+    let micSource = 'local'
+    let micChunkMs = 30
+    let micStartedMsg = false
+    let wantMicSend = false
+    let lastServerStatus = ''
     const retryTimer = createWorkerTimer()
+
+    const browserMic = createBrowserMic({
+      onChunk: (buffer) => {
+        if (!wantMicSend || !ws || ws.readyState !== WebSocket.OPEN) return
+        if (!micStartedMsg) {
+          ws.send(
+            JSON.stringify({
+              type: 'mic_start',
+              format: 'pcm_s16le',
+              rate: 16000,
+              chunk_ms: micChunkMs,
+            }),
+          )
+          micStartedMsg = true
+        }
+        ws.send(buffer)
+      },
+      onError: (err) => {
+        const detail = err?.message || 'Microphone permission denied'
+        setStatus('error')
+        setStatusDetail(detail)
+        setLastError(detail)
+      },
+    })
+
+    const syncMicSending = (statusValue) => {
+      // Half-duplex: only uplink while the server is listening (drops during thinking/speaking).
+      wantMicSend = micSource === 'browser' && statusValue === 'listening'
+      browserMic.setSending(wantMicSend)
+    }
+
+    const ensureBrowserMic = () => {
+      if (micSource !== 'browser' || closed) return
+      void browserMic.start(micChunkMs).then(() => {
+        syncMicSending(lastServerStatus)
+      })
+    }
 
     const stopAudio = () => {
       stream = null
@@ -275,6 +318,7 @@ function useChatBridge() {
       } catch {
         /* ignore unlock failures; gesture still counts for later play() */
       }
+      ensureBrowserMic()
     }
 
     const base64ToBytes = (b64) => {
@@ -455,6 +499,9 @@ function useChatBridge() {
       if (!ws) return
       const old = ws
       ws = null
+      micStartedMsg = false
+      wantMicSend = false
+      browserMic.setSending(false)
       old.onopen = old.onmessage = old.onclose = old.onerror = null
       try {
         old.close()
@@ -539,7 +586,19 @@ function useChatBridge() {
         } catch {
           return
         }
-        if (data.type === 'chat' && data.text) {
+        if (data.type === 'mic_config') {
+          micSource = data.source === 'browser' ? 'browser' : 'local'
+          micChunkMs = Number(data.chunk_ms) > 0 ? Number(data.chunk_ms) : 30
+          micStartedMsg = false
+          if (micSource === 'browser' && audioUnlockedRef.current) {
+            ensureBrowserMic()
+          } else if (micSource !== 'browser') {
+            wantMicSend = false
+            browserMic.setSending(false)
+            void browserMic.stop()
+          }
+          syncMicSending(lastServerStatus)
+        } else if (data.type === 'chat' && data.text) {
           if (data.who === 'you') setLastError('')
           setLine({ who: data.who === 'you' ? 'you' : 'frieren', text: data.text })
         } else if (data.type === 'audio_start') {
@@ -554,9 +613,14 @@ function useChatBridge() {
           if (data.value === 'ready' && audioRef.current && !audioRef.current.paused) {
             return
           }
+          lastServerStatus = data.value
           setStatus(data.value)
           setStatusDetail(data.detail || '')
           if (data.value === 'error') setLastError(data.detail || 'Unknown error')
+          syncMicSending(data.value)
+          if (data.value === 'listening' && micSource === 'browser') {
+            ensureBrowserMic()
+          }
         }
       }
 
@@ -608,6 +672,7 @@ function useChatBridge() {
       window.removeEventListener('pointerdown', onUserGesture)
       window.removeEventListener('keydown', onUserGesture)
       dropSocket()
+      void browserMic.stop()
     }
   }, [])
 
