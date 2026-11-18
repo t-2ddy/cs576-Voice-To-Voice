@@ -15,12 +15,14 @@ A real-time AI voice companion: you talk into the mic, **Frieren** (an elf mage 
 - ✅ Client reconnect with exponential backoff (×1.5, max 10 s)
 - ✅ WebSocket keepalive pings (library default, every 20 s)
 
-**Planned** (N = networking feature, numbered by priority)
-- ⬜ N1 Latency instrumentation per pipeline stage + RTT, network panel in UI
-- ⬜ N2 Binary WS frames (drop base64 overhead) + HTTP connection reuse
-- ⬜ N3 Streaming TTS, audio chunks forwarded over the WS
-- ⬜ N4 Browser mic → server real-time audio streaming (true client-server, LAN devices)
-- ⬜ N5 Experiments under simulated latency / loss / bandwidth caps
+**Done** (N = networking feature; results in [`findings/`](findings/README.md))
+- ✅ N1 Latency instrumentation per pipeline stage, per-turn CSV (baseline 3675 ms; UI network panel + RTT not built)
+- ✅ N2 Binary WS frames + HTTP connection reuse (−114 ms)
+- ✅ N3 Streaming TTS + streaming model text, audio chunks forwarded over the WS (3309 ms, −366 ms / −10% since N1)
+
+**Planned**
+- ⬜ N5 Experiments under simulated latency / loss (next; test plan in `findings/N5-network-conditions.md`)
+- ⬜ N4 Browser mic → server real-time audio streaming (code built, not measured)
 - ⬜ N6 `wss://`, auth on handshake, Origin check, per-user sessions
 - ⬜ N7 Resilience: heartbeats, session resume, jittered retry on API errors
 - ⬜ N8 (stretch) WebSocket/TCP vs WebRTC/UDP comparison
@@ -71,7 +73,7 @@ After sending `audio`, the server waits for `playback_done` (or a timeout of cli
 - **Reverse proxy**: Vite proxies `/ws` → `ws://127.0.0.1:8766` (same-origin for the browser; server bound to loopback only).
 - **Reconnect with exponential backoff**: client retries ×1.5 per attempt, capped at 10 s.
 - **Application-level flow control**: the half-duplex `playback_done` handshake with timeout fallback.
-- **Known inefficiencies to measure and fix**: MP3 is base64 inside JSON (~33% overhead); `elevenlabs_tts.py` uses `urllib`, so every call pays a fresh TCP + TLS handshake (the `openai` SDK reuses connections).
+- **Inefficiencies fixed in N2**: MP3 was base64 inside JSON (the WebSocket's `permessage-deflate` already squeezed it back to about MP3 size on the wire, so the cost was CPU, not bandwidth), and every turn opened a new TCP + TLS connection to OpenAI, Supabase, and ElevenLabs (~170 ms). Audio now goes as binary frames and all three connections are kept alive.
 
 ### Planned additions (priority order)
 Each item should produce a before/after number; N1 is the measuring tool for the rest.
@@ -79,7 +81,7 @@ Each item should produce a before/after number; N1 is the measuring tool for the
 | # | Item | Effort | What to measure / show |
 |---|---|---|---|
 | N1 | **Latency instrumentation**: timestamp each stage (end of speech → STT RTT → LLM → TTS → WS delivery → playback start); WS ping/RTT; a `metrics` message type and a small network panel in the UI; CSV log per turn | Low | Per-stage latency breakdown; total voice-to-voice latency |
-| N2 | **Binary WS frames + connection reuse**: send MP3 as binary frames instead of base64 JSON; persistent HTTP session for ElevenLabs | Low | Bytes on the wire (−33%); handshake time saved per turn |
+| N2 | **Binary WS frames + connection reuse**: send MP3 as binary frames instead of base64 JSON; persistent HTTP session for ElevenLabs | Low | Bytes on the wire (predicted −33%; measured ≈ 0 because deflate already removed the base64 overhead); handshake time saved per turn (−114 ms total) |
 | N3 | **Streaming TTS**: ElevenLabs streaming (chunked HTTP or its WS endpoint), forward chunks over the WS, client plays progressively | Medium | Time-to-first-audio before vs after |
 | N4 | **Browser mic → server audio streaming**: capture in the browser, stream 16 kHz/16-bit PCM (256 kbps) as binary WS frames; server VAD/STT on the stream. Makes it true client-server; a phone or another LAN device can be the client | High | Bandwidth, chunk size vs latency, jitter, backpressure |
 | N5 | **Network-condition experiments**: clumsy (Windows) or Chrome DevTools throttling to add latency, loss, bandwidth caps | Low (after N1) | How each stage degrades; TCP head-of-line blocking under loss |
@@ -87,7 +89,7 @@ Each item should produce a before/after number; N1 is the measuring tool for the
 | N7 | **Resilience**: tuned heartbeats, session resume with message sequence numbers, retry with jittered backoff on API errors / HTTP 429 | Low | Recovery time after a dropped connection |
 | N8 | **Protocol comparison (stretch)**: WebSocket/TCP audio vs WebRTC (UDP + Opus), e.g. OpenAI Realtime over WebRTC as a baseline | High | Latency and loss tolerance, TCP vs UDP |
 
-**Recommended scope:** core = N1 + N2 + N3; then N4 with N5 as the experiments section if time allows. Capture the WebSocket handshake and frames in **Wireshark** for the report (loopback capture via Npcap).
+**Presentation scope:** N1 + N2 + N3 (done) + N5 (experiments section, next). N4, N6, N7, N8 are TBD; see the priority table in [`findings/README.md`](findings/README.md). Capture the WebSocket handshake and frames in **Wireshark** for the report (loopback capture via Npcap).
 
 ## Setup
 
