@@ -1,5 +1,19 @@
 # Findings
 
+## Status at a glance
+
+**Completed**
+- **N1, latency instrumentation:** per-stage timing, per-turn CSV, `metrics_summary.py`. Baseline total median 3675 ms. (Live UI panel and WS RTT not done.)
+- **N2, connection reuse + binary frames:** 3 → 0 new TLS connections per turn; total median −114 ms.
+- **N3, streaming TTS (N3a) + streaming model text (N3b):** total median 3309 ms, −366 ms (−10%) since N1.
+
+**TBD**
+- **N5, network-condition experiments:** next; test plan written, runs pending.
+- **N4, browser mic streaming:** code built (`92c4197`), not measured.
+- **N6, security + multi-user**
+- **N7, resilience**
+- **N8, protocol comparison**
+
 Measurements and observations for the cs576 report. Each planned feature gets one file. Every result is recorded **before and after** the change, using N1's instrumentation as the measuring tool.
 
 ## Index
@@ -10,7 +24,7 @@ Measurements and observations for the cs576 report. Each planned feature gets on
 | [N1-latency-instrumentation.md](N1-latency-instrumentation.md) | Per-stage timing, WS RTT, `metrics` message, CSV log | In progress (phase A done) |
 | [N2-binary-frames-connection-reuse.md](N2-binary-frames-connection-reuse.md) | Binary WS audio frames, persistent ElevenLabs HTTP session | Done (total median −114 ms) |
 | [N3-streaming-tts.md](N3-streaming-tts.md) | Streaming TTS (N3a) + LLM text streaming (N3b), progressive playback | Done (N1→N3b total −366 ms / −10%) |
-| [N4-browser-mic-streaming.md](N4-browser-mic-streaming.md) | Browser mic → server PCM streaming | TBD (code built, uncommitted; not measured) |
+| [N4-browser-mic-streaming.md](N4-browser-mic-streaming.md) | Browser mic → server PCM streaming | TBD (code built, not measured) |
 | [N5-network-conditions.md](N5-network-conditions.md) | Lag / loss experiments with clumsy | Planned (test plan written, runs pending) |
 | [N6-security-multi-user.md](N6-security-multi-user.md) | `wss://`, handshake auth, Origin check, per-user sessions | TBD |
 | [N7-resilience.md](N7-resilience.md) | Heartbeats, session resume, jittered retry on 429 | TBD |

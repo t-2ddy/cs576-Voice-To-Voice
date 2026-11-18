@@ -1,6 +1,6 @@
 # N4 · Browser mic → server audio streaming
 
-> **Status: TBD.** Code is built but uncommitted (`client/src/browserMic.js`, `client/public/pcm-worklet.js`, `MIC_SOURCE=browser` in `server/chat_bridge.py`). Not measured; not in the presentation scope. Known gaps before measuring: audio from every connected tab is mixed into one buffer, and `total_ms` doesn't include the browser → server uplink time. `data/N4-before-2026-11-17.csv` is an exact copy of `N3b-after-2026-11-17.csv`. See the priority table in `README.md`.
+> **Status: TBD.** Code is built (commit `92c4197`: `client/src/browserMic.js`, `client/public/pcm-worklet.js`, `MIC_SOURCE=browser` in `server/chat_bridge.py`). Not measured; not in the presentation scope. Known gaps before measuring: audio from every connected tab is mixed into one buffer, and `total_ms` doesn't include the browser → server uplink time. `data/N4-before-2026-11-17.csv` is an exact copy of `N3b-after-2026-11-17.csv`. See the priority table in `README.md`.
 
 ## Goal
 Capture the mic in the browser and stream 16 kHz / 16-bit PCM as binary WS frames, so any device on the LAN (e.g. a phone) can be the client.
