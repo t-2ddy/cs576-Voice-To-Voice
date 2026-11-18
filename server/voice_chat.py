@@ -35,6 +35,7 @@ from chat_bridge import (
     wait_for_playback,
 )
 from chat_memory import build_context_if_needed, prune_recent_turns, store_turn
+import elevenlabs_tts
 from elevenlabs_tts import extract_spoken_text, synthesize
 from local_model import LocalModel
 from metrics import TurnTimer, csv_path
@@ -106,6 +107,12 @@ def main() -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    # Open the TTS connection now so the first turn doesn't pay the TLS handshake.
+    try:
+        elevenlabs_tts.warm_up()
+    except RuntimeError as exc:
+        print(f"(ElevenLabs warm-up failed: {exc})", file=sys.stderr)
+
     # Each session starts fresh; past turns stay recallable via chat_memory + summary.
     print("Archiving previous conversation...")
     try:
@@ -159,6 +166,7 @@ def main() -> None:
                     try:
                         mp3 = synthesize(spoken)
                         timer.mark("tts_done")
+                        timer.tts_handshake_ms = elevenlabs_tts.last_handshake_ms
                     except Exception as exc:
                         print(f"(ElevenLabs TTS failed: {exc})", file=sys.stderr)
                         emit_status("error", f"TTS failed: {exc}")
@@ -170,7 +178,7 @@ def main() -> None:
                     emit_status("speaking")
                     emit_chat("frieren", reply)
                     timer.mark("audio_sent")
-                    emit_audio(mp3)
+                    timer.ws_bytes = emit_audio(mp3)
                     # Half-duplex: don't listen while the reply plays, or the mic
                     # hears Frieren through the speakers and she answers herself.
                     timeout = len(mp3) / MP3_BYTES_PER_SECOND + PLAYBACK_GRACE_SECONDS

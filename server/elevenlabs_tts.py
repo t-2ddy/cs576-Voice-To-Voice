@@ -4,12 +4,14 @@ Env (server/.env):
   ELEVENLABS_VOICE_ID
 """
 from __future__ import annotations
-import json
 import os
 import re
-import urllib.error
-import urllib.request
+import time
+
+import httpx
 from dotenv import load_dotenv
+
+from http_pool import persistent_client
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 load_dotenv()  # also allow cwd override
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
@@ -38,7 +40,52 @@ ELEVENLABS_STYLE = _env_float("ELEVENLABS_STYLE", 0.1)
 ELEVENLABS_SPEED = _env_float("ELEVENLABS_SPEED", .9)
 ELEVENLABS_SPEAKER_BOOST = _env_bool("ELEVENLABS_SPEAKER_BOOST", True)
 
-TTS_URL_TEMPLATE = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+API_BASE = "https://api.elevenlabs.io"
+TTS_URL_TEMPLATE = API_BASE + "/v1/text-to-speech/{voice_id}"
+TTS_TIMEOUT_SECONDS = 60.0
+
+_http: httpx.Client | None = None
+# TCP connect + TLS handshake time of the last synthesize() call; 0 when the
+# pooled connection was reused.
+last_handshake_ms = 0
+
+
+def _client() -> httpx.Client:
+    global _http
+    if _http is None:
+        _http = persistent_client(TTS_TIMEOUT_SECONDS)
+    return _http
+
+
+class _HandshakeTrace:
+    """httpx trace hook: times connect_tcp through start_tls for a new connection."""
+
+    def __init__(self) -> None:
+        self.started: float | None = None
+        self.finished: float | None = None
+
+    def __call__(self, event_name: str, _info: dict) -> None:
+        if event_name == "connection.connect_tcp.started":
+            self.started = time.perf_counter()
+        elif event_name in ("connection.start_tls.complete", "connection.connect_tcp.complete"):
+            self.finished = time.perf_counter()
+
+    def ms(self) -> int:
+        if self.started is None or self.finished is None:
+            return 0
+        return round((self.finished - self.started) * 1000)
+
+
+def warm_up() -> None:
+    """Open the pooled HTTPS connection before the first turn. Raises RuntimeError on failure."""
+    if not ELEVENLABS_API_KEY:
+        raise RuntimeError("Missing ELEVENLABS_API_KEY in server/.env")
+    try:
+        response = _client().get(API_BASE + "/v1/models", headers={"xi-api-key": ELEVENLABS_API_KEY})
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"ElevenLabs warm-up failed: {exc}") from exc
+    if response.status_code >= 400:
+        raise RuntimeError(f"ElevenLabs warm-up HTTP {response.status_code}: {response.text[:200]}")
 _NARRATION_RE = re.compile(r"\*\*[^*]+\*\*")
 _SPOKEN_RE = re.compile(r'"([^"]+)"')
 # Phonetic alias for TTS only; UI still shows "Frieren".
@@ -83,31 +130,28 @@ def synthesize(
         "speed": speed if speed is not None else ELEVENLABS_SPEED,
         "use_speaker_boost": speaker_boost if speaker_boost is not None else ELEVENLABS_SPEAKER_BOOST,
     }
-    payload = json.dumps(
-        {
-            "text": text.strip(),
-            "model_id": ELEVENLABS_MODEL_ID,
-            "voice_settings": voice_settings,
-        }
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=payload,
-        headers={
-            "xi-api-key": ELEVENLABS_API_KEY,
-            "Accept": "audio/mpeg",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    global last_handshake_ms
+    trace = _HandshakeTrace()
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            audio = response.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"ElevenLabs HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
+        response = _client().post(
+            url,
+            json={
+                "text": text.strip(),
+                "model_id": ELEVENLABS_MODEL_ID,
+                "voice_settings": voice_settings,
+            },
+            headers={
+                "xi-api-key": ELEVENLABS_API_KEY,
+                "Accept": "audio/mpeg",
+            },
+            extensions={"trace": trace},
+        )
+    except httpx.HTTPError as exc:
         raise RuntimeError(f"ElevenLabs request failed: {exc}") from exc
+    last_handshake_ms = trace.ms()
+    if response.status_code >= 400:
+        raise RuntimeError(f"ElevenLabs HTTP {response.status_code}: {response.text}")
+    audio = response.content
     if not audio:
         raise RuntimeError("ElevenLabs returned empty audio")
     return audio

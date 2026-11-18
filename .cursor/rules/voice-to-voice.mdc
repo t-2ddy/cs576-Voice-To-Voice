@@ -23,7 +23,7 @@ Do not re-litigate these choices unless there's a real problem. The OpenAI migra
 
 - **Rolling summary**: the summarizer in `chat_memory.py` uses the same `complete_chat()` helper as replies.
 
-- **TTS**: ElevenLabs REST `text-to-speech` in `server/elevenlabs_tts.py` (character replies only). Env: `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` in `server/.env`. MP3 is base64-broadcast on the chat WS (`type: audio`) and played in the React client. Streaming TTS is planned (N3).
+- **TTS**: ElevenLabs REST `text-to-speech` in `server/elevenlabs_tts.py` (character replies only). Env: `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` in `server/.env`. Uses one pooled `httpx` connection (`server/http_pool.py`, opened at startup by `warm_up()`). MP3 goes out on the chat WS as an `audio` JSON header plus one binary frame and is played in the React client. Streaming TTS is planned (N3).
 
 - **Bridge**: custom orchestrator / harness (Python) that clients connect to via WebSocket. Chosen over a folder-watch approach so the connection can carry more than audio later (expressions, status, interrupts).
 
@@ -44,7 +44,9 @@ Server → client:
 ```json
 {"type": "chat", "who": "you", "text": "..."}
 {"type": "chat", "who": "frieren", "text": "..."}
-{"type": "audio", "format": "mp3", "data": "<base64>"}
+{"type": "audio", "format": "mp3", "encoding": "binary", "bytes": 76947}
+<binary frame: the 76947 MP3 bytes>
+{"type": "audio", "format": "mp3", "data": "<base64>"}   (legacy, WS_AUDIO_BINARY=0)
 {"type": "status", "value": "listening"}
 {"type": "status", "value": "thinking"}
 {"type": "status", "value": "speaking"}
@@ -72,7 +74,7 @@ Every future feature should be a new `type` value, not a new connection or trans
 - **Reverse proxy**: Vite proxies `/ws` → `ws://127.0.0.1:8766` (same-origin for the browser; server bound to loopback only).
 - **Reconnect with exponential backoff**: client retries ×1.5 per attempt, capped at 10 s.
 - **Application-level flow control**: the half-duplex `playback_done` handshake with timeout fallback (see Message protocol).
-- **Known inefficiencies to measure and fix**: MP3 is base64 inside JSON (~33% overhead); `elevenlabs_tts.py` uses `urllib`, so every call pays a fresh TCP + TLS handshake (the `openai` SDK reuses connections via httpx).
+- **N2 changes (before/after in `findings/N2-...md`)**: the before capture showed `permessage-deflate` already squeezed base64 audio back to ~MP3 size on the wire, and every turn opened a new TLS connection to OpenAI, Supabase, and ElevenLabs (httpx's default 5 s `keepalive_expiry`; `urllib` for ElevenLabs), about 170 ms per turn. Now: binary audio frames with WS compression off (`WS_AUDIO_BINARY`, `WS_COMPRESSION` toggles in `chat_bridge.py`), and all three API clients share keep-alive settings from `server/http_pool.py` (`HTTP_KEEPALIVE_SECONDS`, default 300). CSV gains `ws_bytes` and `tts_handshake_ms`.
 
 ### Planned additions (priority order)
 N = networking feature, numbered by priority. Every item should produce a before/after number for the report; N1 is the measuring tool for the rest.
@@ -80,7 +82,7 @@ N = networking feature, numbered by priority. Every item should produce a before
 | # | Item | Effort | What to measure / show |
 |---|---|---|---|
 | N1 | **Latency instrumentation**: timestamp each stage (end of speech → STT RTT → LLM → TTS → WS delivery → playback start); WS ping/RTT; a `metrics` message type and a small network panel in the UI; CSV log per turn | Low | Per-stage latency breakdown; total voice-to-voice latency |
-| N2 | **Binary WS frames + connection reuse**: send MP3 as binary frames instead of base64 JSON; persistent HTTP session for ElevenLabs | Low | Bytes on the wire (−33%); handshake time saved per turn |
+| N2 | **Binary WS frames + connection reuse**: send MP3 as binary frames instead of base64 JSON; keep-alive HTTP sessions for ElevenLabs, OpenAI, and Supabase | Low | Handshakes per turn and time saved; payload bytes (on-the-wire saving is ~0 because deflate already removed base64 overhead) |
 | N3 | **Streaming TTS**: ElevenLabs streaming (chunked HTTP or its WS endpoint), forward chunks over the WS, client plays progressively | Medium | Time-to-first-audio before vs after |
 | N4 | **Browser mic → server audio streaming**: capture in the browser, stream 16 kHz/16-bit PCM (256 kbps) as binary WS frames; server VAD/STT on the stream. Makes it true client-server; phone or another LAN device can be the client | High | Bandwidth, chunk size vs latency, jitter, backpressure |
 | N5 | **Network-condition experiments**: clumsy (Windows) or Chrome DevTools throttling to add latency, loss, bandwidth caps | Low (after N1) | How each stage degrades; TCP head-of-line blocking under loss |
@@ -102,12 +104,14 @@ N = networking feature, numbered by priority. Every item should produce a before
 ## Environment notes
 - Windows desktop
 - Python 3.14
-- Env vars (template in `server/.env.example`): `OPENAI_API_KEY`, `LLM_MODEL`, optional `LLM_REASONING_EFFORT`, optional `STT_MODEL`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (plus optional `ELEVENLABS_MODEL_ID` / voice-setting overrides), `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+- Env vars (template in `server/.env.example`): `OPENAI_API_KEY`, `LLM_MODEL`, optional `LLM_REASONING_EFFORT`, optional `STT_MODEL`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (plus optional `ELEVENLABS_MODEL_ID` / voice-setting overrides), `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, optional `METRICS_CSV`, `HTTP_KEEPALIVE_SECONDS`, `WS_AUDIO_BINARY`, `WS_COMPRESSION`
 
 ## Immediate next steps
-1. Run an end-to-end test (`python voice_chat.py` in `server/` + `npm run dev` in `client/`); tune VAD/turn-taking (threshold; `VAD_SILENCE_END_MS` set to 900) and check half-duplex muting with speakers. Record in `findings/00-baseline-e2e.md`.
-2. Start the networking core: N1 (latency instrumentation) first, then N2, then N3.
-3. Decide on fresh-chat-per-run (archive `recent_turns` at startup).
+Done: end-to-end baseline (`findings/00-baseline-e2e.md`, `VAD_SILENCE_END_MS=1200`), fresh chat per run (startup archives `recent_turns`), and N1 phase A (per-stage CSV; baseline median 3675 ms / p90 4107 ms, end of speech to playback start).
+1. N1 phase B: WS RTT from `websockets` keepalive pings, a `metrics` message per turn, small network panel in the UI.
+2. N2 done: 0 new TLS connections per turn (was 3), TTS −91 ms, STT −94 ms, total median 3675 → 3561 ms; binary frames ≈ same bytes on the wire (deflate had already removed base64 overhead). New baseline for later items: `findings/data/N2-after-2026-11-17.csv`.
+3. N3: streaming TTS (consider streaming LLM text into it, since the LLM is the largest API stage).
+4. Deferred, low priority: speaker echo test for half-duplex muting.
 
 ## TBD (out of scope for now)
 - **Spells as agentic tools**: Frieren frames help as casting spells; wire real tool/function calls after the networking core. Spells that call external web APIs fit the networking theme.

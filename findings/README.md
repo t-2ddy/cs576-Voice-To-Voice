@@ -8,7 +8,7 @@ Measurements and observations for the cs576 report. Each planned feature gets on
 |---|---|---|
 | [00-baseline-e2e.md](00-baseline-e2e.md) | End-to-end test, VAD / turn-taking tuning, baseline latency | In progress |
 | [N1-latency-instrumentation.md](N1-latency-instrumentation.md) | Per-stage timing, WS RTT, `metrics` message, CSV log | In progress (phase A done) |
-| [N2-binary-frames-connection-reuse.md](N2-binary-frames-connection-reuse.md) | Binary WS audio frames, persistent ElevenLabs HTTP session | Not started |
+| [N2-binary-frames-connection-reuse.md](N2-binary-frames-connection-reuse.md) | Binary WS audio frames, persistent ElevenLabs HTTP session | Done (total median −114 ms) |
 | [N3-streaming-tts.md](N3-streaming-tts.md) | ElevenLabs streaming, progressive playback | Not started |
 | [N4-browser-mic-streaming.md](N4-browser-mic-streaming.md) | Browser mic → server PCM streaming | Not started |
 | [N5-network-conditions.md](N5-network-conditions.md) | Latency / loss / bandwidth experiments (clumsy, DevTools) | Not started |

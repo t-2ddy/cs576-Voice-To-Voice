@@ -30,7 +30,7 @@ LABELS = {
 def load_rows(paths: list[str]) -> tuple[list[dict], int]:
     rows, skipped = [], 0
     for path in paths:
-        with open(path, newline="", encoding="utf-8") as f:
+        with open(path, newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 if row.get("notes") or not row.get("total_ms"):
                     skipped += 1
@@ -72,6 +72,22 @@ def main() -> None:
         median = statistics.median(values)
         share = "100%" if column == "total_ms" else f"{median / total_median:.0%}"
         print(f"| {LABELS[column]} | {median:.0f} | {p90(values):.0f} | {share} |")
+
+    ws_bytes = [float(r["ws_bytes"]) for r in rows if r.get("ws_bytes")]
+    mp3_bytes = [float(r["mp3_bytes"]) for r in rows if r.get("mp3_bytes")]
+    handshakes = [float(r["tts_handshake_ms"]) for r in rows if r.get("tts_handshake_ms")]
+    if ws_bytes or handshakes:
+        print()
+    if ws_bytes:
+        ratio = statistics.median(ws_bytes) / statistics.median(mp3_bytes)
+        print(
+            f"WS audio payload: median {statistics.median(ws_bytes):.0f} bytes "
+            f"({ratio:.0%} of median MP3 {statistics.median(mp3_bytes):.0f} bytes)"
+        )
+    if handshakes:
+        new = [h for h in handshakes if h > 0]
+        detail = f", median {statistics.median(new):.0f} ms when new" if new else ""
+        print(f"TTS new connections: {len(new)} of {len(handshakes)} turns{detail}")
 
 
 if __name__ == "__main__":

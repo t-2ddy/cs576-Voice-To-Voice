@@ -273,15 +273,20 @@ function useChatBridge() {
       }
     }
 
-    const playMp3Base64 = (b64, recvTs = Date.now(), blocked = false) => {
+    const base64ToBytes = (b64) => {
+      const binary = atob(b64)
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i)
+      }
+      return bytes
+    }
+
+    // `bytes` is an ArrayBuffer (binary WS frame) or Uint8Array (decoded base64).
+    const playMp3 = (bytes, recvTs = Date.now(), blocked = false) => {
       stopAudio()
       pendingAudioRef.current = null
       try {
-        const binary = atob(b64)
-        const bytes = new Uint8Array(binary.length)
-        for (let i = 0; i < binary.length; i += 1) {
-          bytes[i] = binary.charCodeAt(i)
-        }
         const blob = new Blob([bytes], { type: 'audio/mpeg' })
         const url = URL.createObjectURL(blob)
         objectUrlRef.current = url
@@ -304,12 +309,12 @@ function useChatBridge() {
           sendPlaybackDone()
         }
         void audio.play().catch((err) => {
-          const blocked =
+          const autoplayBlocked =
             err?.name === 'NotAllowedError' ||
             /not allowed|user.*denied|interact/i.test(err?.message || '')
-          if (blocked) {
+          if (autoplayBlocked) {
             // Keep the clip; next user gesture will replay it.
-            pendingAudioRef.current = { b64, recvTs }
+            pendingAudioRef.current = { bytes, recvTs }
             setStatus('error')
             setStatusDetail('Click the window to enable audio')
             setLastError('Click the window to enable audio')
@@ -388,6 +393,7 @@ function useChatBridge() {
       )
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
       const sock = new WebSocket(`${proto}://${window.location.host}/ws`)
+      sock.binaryType = 'arraybuffer'
       ws = sock
       connectStartedAt = Date.now()
       retryTimer.set(() => {
@@ -406,6 +412,11 @@ function useChatBridge() {
 
       sock.onmessage = (event) => {
         const recvTs = Date.now()
+        // Binary frames carry the MP3 announced by the preceding `audio` header.
+        if (event.data instanceof ArrayBuffer) {
+          playMp3(event.data, recvTs)
+          return
+        }
         let data
         try {
           data = JSON.parse(event.data)
@@ -416,7 +427,7 @@ function useChatBridge() {
           if (data.who === 'you') setLastError('')
           setLine({ who: data.who === 'you' ? 'you' : 'frieren', text: data.text })
         } else if (data.type === 'audio' && data.data) {
-          playMp3Base64(data.data, recvTs)
+          playMp3(base64ToBytes(data.data), recvTs)
         } else if (data.type === 'status' && data.value) {
           // Don't let a quick server "ready" clobber local speaking while audio plays.
           if (data.value === 'ready' && audioRef.current && !audioRef.current.paused) {
@@ -456,7 +467,7 @@ function useChatBridge() {
       const pending = pendingAudioRef.current
       if (pending) {
         pendingAudioRef.current = null
-        playMp3Base64(pending.b64, pending.recvTs, true)
+        playMp3(pending.bytes, pending.recvTs, true)
       }
     }
 

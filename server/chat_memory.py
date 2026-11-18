@@ -29,11 +29,15 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from supabase import Client, create_client
+from supabase.lib.client_options import SyncClientOptions
 
+from http_pool import persistent_client
 from local_model import complete_chat
 from openai_client import get_openai_client
 
 load_dotenv()
+
+SUPABASE_TIMEOUT_SECONDS = 120.0
 
 EMBED_MODEL = "text-embedding-3-small"
 EMBED_DIMENSIONS = 768
@@ -120,7 +124,11 @@ def get_supabase() -> Client:
             "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in .env. "
             "Add both before using chat memory."
         )
-    _supabase = create_client(url, key)
+    _supabase = create_client(
+        url,
+        key,
+        options=SyncClientOptions(httpx_client=persistent_client(SUPABASE_TIMEOUT_SECONDS)),
+    )
     return _supabase
 
 

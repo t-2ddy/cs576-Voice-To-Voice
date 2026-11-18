@@ -29,23 +29,38 @@ Phase A (measurement for the baseline) is in; phase B (live panel, round-trip ti
 - **`metrics` message type / UI network panel / WS RTT**: phase B. RTT can come from `websockets` keepalive pings (`connection.latency`).
 
 ## Results: baseline (current code)
-n = · date: · commit: · CSV: `data/`
+n = 29 turns (3 runs of the 10-line script, 1 turn excluded) · date: 2026-11-17 · commit: `deaae25` · CSV: `data/N1-baseline-2026-11-17.csv` · `VAD_SILENCE_END_MS=1200`, client and server on one machine (loopback)
 
 | Stage | Median (ms) | p90 (ms) | Share of total |
 |---|---|---|---|
-| VAD tail | | | |
-| STT | | | |
-| Memory | | | |
-| LLM | | | |
-| TTS | | | |
-| WS delivery | | | |
-| Playback start | | | |
-| **Total** | | | 100% |
+| VAD tail | 1200 | 1200 | 33% |
+| STT | 758 | 1069 | 21% |
+| Memory | 158 | 461 | 4% |
+| LLM | 1062 | 1226 | 29% |
+| TTS | 403 | 539 | 11% |
+| WS delivery | 3 | 5 | 0% |
+| Playback start | 2 | 3 | 0% |
+| **Total** | 3675 | 4107 | 100% |
 
-WS RTT median:
+Shares are each stage's median divided by the total's median, so they don't sum to exactly 100%.
+
+Supporting numbers from the same CSV:
+- Memory: median 423 ms on `full` turns (embedding + `match_memory` RPC) vs 132 ms on `light` turns. The first turn of each run is also slower (299–413 ms) because the session cache for facts + summary starts cold.
+- Hosted API calls (STT + memory + LLM + TTS) together: median 2470 ms, about two thirds of the total.
+- MP3 size: median 77 KB (max 193 KB) for a median 78-character reply. Base64 inflates that to about 103 KB per `audio` message.
+- TTS time tracks clip size closely (correlation 0.86 with MP3 bytes); STT time only loosely tracks utterance length (0.51 with user characters).
+
+WS RTT median: not measured yet (phase B).
 
 ## Analysis
-Which stage dominates? What does that imply for N2/N3 priorities?
+- **Waiting on hosted APIs dominates.** STT, the reply model, and TTS are three sequential HTTPS round trips and make up about 60% of the total. The reply model is the single largest API stage (~1.1 s).
+- **The VAD tail is a third of the total, and it's pure configuration.** It's exactly `VAD_SILENCE_END_MS`, because the detector always ends after that many quiet frames. Every 100 ms cut there is 100 ms off every turn, traded against splitting turns at natural pauses.
+- **The local WebSocket hop is negligible on loopback** (3 ms delivery, 2 ms to start playback), even with ~100 KB of base64 JSON per reply.
+- **Implications for N2:** binary frames will cut bytes on the wire by about 25% (base64 removed), but won't move latency on loopback. Report it as a bandwidth result, and measure time under N5 throttling, where 100 KB starts to matter. Reusing the ElevenLabs connection should shave the TCP + TLS handshake (typically 50–150 ms) off the 403 ms TTS stage.
+- **Implications for N3:** streaming TTS can save at most part of the 403 ms TTS stage, since short clips already return quickly. A bigger win would be overlapping stages, e.g. streaming the reply model's text into streaming TTS so audio starts before the full reply exists.
 
 ## Issues / caveats
--
+- **VAD tail is configured, not observed.** It's computed as the trailing silence count × 30 ms frames, so it's constant per setting. It doesn't capture mic-buffer delay before frames reach the detector.
+- **Clock alignment** relies on one machine. WS delivery and playback start would be wrong with a remote client until clock-offset estimation exists (N4).
+- **Excluded turn:** run 1, turn 1 had autoplay blocked until a click (playback start 4904 ms, total 8800 ms). It was flagged `autoplay_blocked` and skipped. Click the page once before each run to avoid it.
+- **Reply length varies by design** (random length preset), which spreads the TTS and LLM numbers. That's why the CSV records `reply_chars` and `mp3_bytes`.

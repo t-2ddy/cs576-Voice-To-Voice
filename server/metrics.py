@@ -42,6 +42,8 @@ COLUMNS = [
     "reply_chars",
     "mp3_bytes",
     *(name for name, _start, _end in STAGES),
+    "ws_bytes",
+    "tts_handshake_ms",
     "notes",
 ]
 
@@ -54,6 +56,11 @@ def csv_path() -> str:
     return os.path.normpath(os.path.join(DATA_DIR, name))
 
 
+def _header(path: str) -> list[str]:
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        return next(csv.reader(f), [])
+
+
 class TurnTimer:
     """Collects stage timestamps and metadata for one voice turn."""
 
@@ -64,6 +71,8 @@ class TurnTimer:
         self.user_chars = 0
         self.reply_chars = 0
         self.mp3_bytes = 0
+        self.ws_bytes: int | None = None
+        self.tts_handshake_ms: int | None = None
         self.notes: list[str] = []
 
     def mark(self, name: str, at: float | None = None) -> None:
@@ -93,7 +102,8 @@ class TurnTimer:
             f"(latency: total {fmt('total_ms')} ms | vad {fmt('vad_tail_ms')} | "
             f"stt {fmt('stt_ms')} | mem {fmt('memory_ms')} | llm {fmt('llm_ms')} | "
             f"tts {fmt('tts_ms')} | ws {fmt('ws_delivery_ms')} | "
-            f"play {fmt('playback_start_ms')})"
+            f"play {fmt('playback_start_ms')} | tts handshake {self.tts_handshake_ms} | "
+            f"ws bytes {self.ws_bytes})"
         )
 
     def write_row(self) -> str:
@@ -101,6 +111,11 @@ class TurnTimer:
         path = csv_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         new_file = not os.path.exists(path) or os.path.getsize(path) == 0
+        if not new_file and _header(path) != COLUMNS:
+            # Never mix column layouts in one file (e.g. an older N1 baseline CSV).
+            root, ext = os.path.splitext(path)
+            path = f"{root}-v{len(COLUMNS)}{ext}"
+            new_file = not os.path.exists(path) or os.path.getsize(path) == 0
         row = {
             "run": RUN_ID,
             "turn": self.turn,
@@ -109,6 +124,8 @@ class TurnTimer:
             "reply_chars": self.reply_chars,
             "mp3_bytes": self.mp3_bytes,
             **{k: ("" if v is None else v) for k, v in self.durations().items()},
+            "ws_bytes": "" if self.ws_bytes is None else self.ws_bytes,
+            "tts_handshake_ms": "" if self.tts_handshake_ms is None else self.tts_handshake_ms,
             "notes": ";".join(self.notes),
         }
         with open(path, "a", newline="", encoding="utf-8") as f:

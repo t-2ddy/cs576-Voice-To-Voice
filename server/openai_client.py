@@ -10,7 +10,9 @@ from __future__ import annotations
 import os
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import DefaultHttpxClient, OpenAI
+
+from http_pool import keepalive_limits
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 load_dotenv()  # also allow cwd override
@@ -29,5 +31,9 @@ def get_openai_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("Missing OPENAI_API_KEY in server/.env")
-    _client = OpenAI(api_key=api_key, timeout=OPENAI_TIMEOUT_SECONDS)
+    _client = OpenAI(
+        api_key=api_key,
+        timeout=OPENAI_TIMEOUT_SECONDS,
+        http_client=DefaultHttpxClient(limits=keepalive_limits()),
+    )
     return _client
