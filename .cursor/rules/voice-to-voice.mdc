@@ -17,13 +17,13 @@ Do not re-litigate these choices unless there's a real problem. The OpenAI migra
 
 - **Speech-to-text**: OpenAI `STT_MODEL` (default `gpt-4o-mini-transcribe`; `whisper-1` also works) via the `openai` SDK. Each utterance is uploaded as an in-memory WAV. Turn-taking is the RMS energy-threshold VAD in `speechToText.py` (not a native VAD library — `webrtcvad` has no Python 3.14 wheels and is unmaintained). `faster-whisper` and the CUDA DLL helpers are removed.
 
-- **Chat generation**: OpenAI `gpt-5.6-luna` with reasoning off (`reasoning_effort="none"`, set by `LLM_REASONING_EFFORT`, default `none`) via the `openai` SDK in `local_model.py`. Reasoning tokens would count against `max_completion_tokens` and empty out the short replies. Env: `OPENAI_API_KEY`, `LLM_MODEL` (required), optional `LLM_REASONING_EFFORT`. Length presets set `max_completion_tokens`. `LocalModel.start()` verifies the key and model; `.ask()` sends the turn; `complete_chat()` is the shared helper. Note: OpenAI moderates output, which may change persona behavior versus the previous uncensored local model.
+- **Chat generation**: OpenAI `gpt-5.6-luna` with reasoning off (`reasoning_effort="none"`, set by `LLM_REASONING_EFFORT`, default `none`) via the `openai` SDK in `local_model.py`. Reasoning tokens would count against `max_completion_tokens` and empty out the short replies. Env: `OPENAI_API_KEY`, `LLM_MODEL` (required), optional `LLM_REASONING_EFFORT`. Length presets set `max_completion_tokens`. `LocalModel.start()` verifies the key and model; `.ask()` sends the turn; `ask_stream()` (N3b) yields SSE deltas; `complete_chat()` is the shared helper. Note: OpenAI moderates output, which may change persona behavior versus the previous uncensored local model.
 
 - **Embeddings**: OpenAI `text-embedding-3-small` with `dimensions=768`, so the Supabase `vector(768)` column and `match_memory` RPC stay unchanged.
 
 - **Rolling summary**: the summarizer in `chat_memory.py` uses the same `complete_chat()` helper as replies.
 
-- **TTS**: ElevenLabs REST `text-to-speech` in `server/elevenlabs_tts.py` (character replies only). Env: `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` in `server/.env`. Uses one pooled `httpx` connection (`server/http_pool.py`, opened at startup by `warm_up()`). MP3 goes out on the chat WS as an `audio` JSON header plus one binary frame and is played in the React client. Streaming TTS is planned (N3).
+- **TTS**: ElevenLabs REST `text-to-speech` in `server/elevenlabs_tts.py` (character replies only). Env: `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` in `server/.env`. Uses one pooled `httpx` connection (`server/http_pool.py`, opened at startup by `warm_up()`). By default (N3) TTS uses the `/stream` endpoint (`synthesize_stream`) and MP3 chunks are forwarded as they arrive (`audio_start` / binary chunks / `audio_end`), played progressively via MediaSource in the React client; with `LLM_STREAMING=1` the reply text is streamed too (`local_model.ask_stream`, split by `server/sentence_stream.py`) and each sentence gets its own TTS request (`previous_text` = what was already spoken) inside one audio stream. `TTS_STREAMING=0` restores the N2 full clip (`audio` JSON header plus one binary frame).
 
 - **Bridge**: custom orchestrator / harness (Python) that clients connect to via WebSocket. Chosen over a folder-watch approach so the connection can carry more than audio later (expressions, status, interrupts).
 
@@ -32,10 +32,10 @@ Do not re-litigate these choices unless there's a real problem. The OpenAI migra
 ## Architecture
 ```
 Mic → RMS VAD → OpenAI STT → text
-→ OpenAI chat (+ Supabase memory context) → text reply
-→ ElevenLabs TTS API → audio bytes
-→ WebSocket broadcast (chat UI bridge, localhost:8766)
-→ React client (VN textbox + MP3 playback)
+→ OpenAI chat (+ Supabase memory context) → text reply (streamed per sentence with LLM_STREAMING)
+→ ElevenLabs streaming TTS → MP3 chunks
+→ WebSocket broadcast (chat UI bridge, localhost:8766), chunk by chunk
+→ React client (VN textbox + MediaSource MP3 playback)
 ```
 
 ## Message protocol (WebSocket, JSON)
@@ -44,7 +44,10 @@ Server → client:
 ```json
 {"type": "chat", "who": "you", "text": "..."}
 {"type": "chat", "who": "frieren", "text": "..."}
-{"type": "audio", "format": "mp3", "encoding": "binary", "bytes": 76947}
+{"type": "audio_start", "format": "mp3", "stream": 3}     (N3 default)
+<binary frame: one MP3 chunk, repeated as chunks arrive from ElevenLabs>
+{"type": "audio_end", "stream": 3, "bytes": 76947, "chunks": 61}
+{"type": "audio", "format": "mp3", "encoding": "binary", "bytes": 76947}   (TTS_STREAMING=0)
 <binary frame: the 76947 MP3 bytes>
 {"type": "audio", "format": "mp3", "data": "<base64>"}   (legacy, WS_AUDIO_BINARY=0)
 {"type": "status", "value": "listening"}
@@ -55,14 +58,14 @@ Server → client:
 ```
 Client → server:
 ```json
-{"type": "playback_started", "recv_ts": 1763420000000, "play_ts": 1763420000045}
-{"type": "playback_done"}
+{"type": "playback_started", "recv_ts": 1763420000000, "play_ts": 1763420000045, "stream": 3}
+{"type": "playback_done", "stream": 3}
 ```
-`playback_started` (N1) carries browser `Date.now()` timestamps for when the `audio` message arrived and when sound started (`"blocked": true` if autoplay held it until a click). `voice_chat.py` combines them with server stage marks (`server/metrics.py`) into one CSV row per turn in `findings/data/`; `server/metrics_summary.py` prints median / p90 per stage.
-**Half-duplex turn-taking**: after emitting `audio`, `voice_chat.py` waits (`chat_bridge.wait_for_playback`) for `playback_done` before listening again, then flushes queued mic frames so Frieren's voice from the speakers isn't transcribed as the user. Fallback timeout = estimated clip length (128 kbps MP3) + 3 s; no wait when no UI is connected. The user cannot interrupt (barge-in) while she speaks.
+`playback_started` (N1) carries browser `Date.now()` timestamps for when the audio (first chunk, for streams) arrived and when sound started (`"blocked": true` if autoplay held it until a click). Stream reports carry the stream id; while a stream is current the server ignores untagged reports (a stale second tab once unmuted the mic mid-reply). Without MP3 MediaSource support the client plays the collected chunks as one clip at `audio_end`. `voice_chat.py` combines them with server stage marks (`server/metrics.py`) into one CSV row per turn in `findings/data/`; `server/metrics_summary.py` prints median / p90 per stage.
+**Half-duplex turn-taking**: after emitting `audio` / `audio_end`, `voice_chat.py` waits (`chat_bridge.wait_for_playback`) for `playback_done` before listening again, then flushes queued mic frames so Frieren's voice from the speakers isn't transcribed as the user. Fallback timeout = estimated clip length (128 kbps MP3) + 3 s; no wait when no UI is connected. The user cannot interrupt (barge-in) while she speaks.
 
 Errors: the client keeps the last error visible in the status bar until the next user turn.
-The Vite client proxies `/ws` → `ws://127.0.0.1:8766`, live-replaces the VN textbox on each `chat` event, and plays `audio` MP3 for the character. Mic capture remains in Python; STT/TTS run via hosted APIs before the character `chat`+`audio` emit.
+The Vite client proxies `/ws` → `ws://127.0.0.1:8766`, live-replaces the VN textbox on each `chat` event, and plays character audio via MediaSource (`audio/mpeg`, sequence mode) with a Blob-at-`audio_end` fallback when MSE MP3 is unsupported. Mic capture remains in Python; STT/TTS run via hosted APIs.
 
 Every future feature should be a new `type` value, not a new connection or transport.
 
@@ -75,6 +78,7 @@ Every future feature should be a new `type` value, not a new connection or trans
 - **Reconnect with exponential backoff**: client retries ×1.5 per attempt, capped at 10 s.
 - **Application-level flow control**: the half-duplex `playback_done` handshake with timeout fallback (see Message protocol).
 - **N2 changes (before/after in `findings/N2-...md`)**: the before capture showed `permessage-deflate` already squeezed base64 audio back to ~MP3 size on the wire, and every turn opened a new TLS connection to OpenAI, Supabase, and ElevenLabs (httpx's default 5 s `keepalive_expiry`; `urllib` for ElevenLabs), about 170 ms per turn. Now: binary audio frames with WS compression off (`WS_AUDIO_BINARY`, `WS_COMPRESSION` toggles in `chat_bridge.py`), and all three API clients share keep-alive settings from `server/http_pool.py` (`HTTP_KEEPALIVE_SECONDS`, default 300). CSV gains `ws_bytes` and `tts_handshake_ms`.
+- **N3 changes (before/after in `findings/N3-streaming-tts.md`)**: `TTS_STREAMING` (default 1) streams TTS chunks as `audio_start` / binary frames / `audio_end`. `LLM_STREAMING` (default 1) streams the reply and synthesizes per sentence (`sentence_stream.py`) into one audio stream. CSV gains `tts_ttfb_ms`, `chunks`, `first_chunk_bytes`, `llm_ttft_ms`, `first_sentence_ms`, `sentences`.
 
 ### Planned additions (priority order)
 N = networking feature, numbered by priority. Every item should produce a before/after number for the report; N1 is the measuring tool for the rest.
@@ -83,7 +87,7 @@ N = networking feature, numbered by priority. Every item should produce a before
 |---|---|---|---|
 | N1 | **Latency instrumentation**: timestamp each stage (end of speech → STT RTT → LLM → TTS → WS delivery → playback start); WS ping/RTT; a `metrics` message type and a small network panel in the UI; CSV log per turn | Low | Per-stage latency breakdown; total voice-to-voice latency |
 | N2 | **Binary WS frames + connection reuse**: send MP3 as binary frames instead of base64 JSON; keep-alive HTTP sessions for ElevenLabs, OpenAI, and Supabase | Low | Handshakes per turn and time saved; payload bytes (on-the-wire saving is ~0 because deflate already removed base64 overhead) |
-| N3 | **Streaming TTS**: ElevenLabs streaming (chunked HTTP or its WS endpoint), forward chunks over the WS, client plays progressively | Medium | Time-to-first-audio before vs after |
+| N3 | **Streaming audio**: ElevenLabs chunked HTTP + optional LLM text streaming / per-sentence TTS; client MediaSource (Blob fallback) | Medium | Time-to-first-audio before vs after (N3a then N3b) |
 | N4 | **Browser mic → server audio streaming**: capture in the browser, stream 16 kHz/16-bit PCM (256 kbps) as binary WS frames; server VAD/STT on the stream. Makes it true client-server; phone or another LAN device can be the client | High | Bandwidth, chunk size vs latency, jitter, backpressure |
 | N5 | **Network-condition experiments**: clumsy (Windows) or Chrome DevTools throttling to add latency, loss, bandwidth caps | Low (after N1) | How each stage degrades; TCP head-of-line blocking under loss |
 | N6 | **Security + multi-user**: `wss://` via reverse proxy, auth token checked on the WS handshake, `Origin` check against cross-site WebSocket hijacking, per-user sessions (also fixes shared memory) | Medium | Threat model; handshake trace |
@@ -96,7 +100,7 @@ N = networking feature, numbered by priority. Every item should produce a before
 
 ## Known unresolved items / caveats
 - Package installs require explicit user confirmation (workspace rule).
-- Current TTS path is full-clip REST (`elevenlabs_tts.py`) then one WS `audio` message; streaming is N3.
+- Default TTS path streams (`TTS_STREAMING=1`); set `TTS_STREAMING=0` for the N2 full-clip path.
 - Memory is global (no user/session id), and nothing expires: `recent_turns` keeps the last 10 rows after each prune, overflow goes to `chat_memory` + `rolling_summary` forever. The prune counter resets on restart, so sessions shorter than 10 replies never prune. Option under consideration: archive all `recent_turns` at startup (`prune_recent_turns(keep_last=0)`) so each run starts a fresh chat but keeps long-term recall.
 - The mic-to-LLM harness is split across `server/voice_chat.py` (entry/loop), `speechToText.py`, `local_model.py`, `elevenlabs_tts.py`, and `chat_bridge.py` (WS :8766 to the React UI).
 - `key_facts` are read by light/full context builders but not auto-written yet (manual / future extractor).
@@ -104,14 +108,14 @@ N = networking feature, numbered by priority. Every item should produce a before
 ## Environment notes
 - Windows desktop
 - Python 3.14
-- Env vars (template in `server/.env.example`): `OPENAI_API_KEY`, `LLM_MODEL`, optional `LLM_REASONING_EFFORT`, optional `STT_MODEL`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (plus optional `ELEVENLABS_MODEL_ID` / voice-setting overrides), `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, optional `METRICS_CSV`, `HTTP_KEEPALIVE_SECONDS`, `WS_AUDIO_BINARY`, `WS_COMPRESSION`
+- Env vars (template in `server/.env.example`): `OPENAI_API_KEY`, `LLM_MODEL`, optional `LLM_REASONING_EFFORT`, optional `STT_MODEL`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (plus optional `ELEVENLABS_MODEL_ID` / voice-setting overrides), `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, optional `METRICS_CSV`, `HTTP_KEEPALIVE_SECONDS`, `WS_AUDIO_BINARY`, `WS_COMPRESSION`, `TTS_STREAMING`, `LLM_STREAMING`
 
 ## Immediate next steps
 Done: end-to-end baseline (`findings/00-baseline-e2e.md`, `VAD_SILENCE_END_MS=1200`), fresh chat per run (startup archives `recent_turns`), and N1 phase A (per-stage CSV; baseline median 3675 ms / p90 4107 ms, end of speech to playback start).
 1. N1 phase B: WS RTT from `websockets` keepalive pings, a `metrics` message per turn, small network panel in the UI.
 2. N2 done: 0 new TLS connections per turn (was 3), TTS −91 ms, STT −94 ms, total median 3675 → 3561 ms; binary frames ≈ same bytes on the wire (deflate had already removed base64 overhead). New baseline for later items: `findings/data/N2-after-2026-11-17.csv`.
-3. N3: streaming TTS (consider streaming LLM text into it, since the LLM is the largest API stage).
-4. Deferred, low priority: speaker echo test for half-duplex muting.
+3. N3 done: N3a −117 ms, N3b −135 ms more; N1→N3b total 3675 → 3309 ms (−10%). Data in `findings/data/N3{a,b}-after-2026-11-17.csv`.
+4. Next if time: N4 (browser mic) and/or N5 (clumsy conditions). Deferred, low priority: speaker echo test for half-duplex muting.
 
 ## TBD (out of scope for now)
 - **Spells as agentic tools**: Frieren frames help as casting spells; wire real tool/function calls after the networking core. Spells that call external web APIs fit the networking theme.

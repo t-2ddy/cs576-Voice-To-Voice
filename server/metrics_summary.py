@@ -1,10 +1,11 @@
-"""Summarize N1 latency CSVs as a markdown table (median, p90, share of total).
+"""Summarize latency CSVs as a markdown table (median, p90, share of total).
 
 Usage (from server/):
-  python metrics_summary.py                 # newest findings/data/N1-*.csv
+  python metrics_summary.py                 # newest findings/data/*.csv
   python metrics_summary.py a.csv b.csv     # combine specific files
 
 Rows with any note (autoplay blocked, no UI, TTS failed, ...) or no total are skipped.
+Streaming (N3) detail columns get a second table when present.
 """
 
 import csv
@@ -13,7 +14,7 @@ import os
 import statistics
 import sys
 
-from metrics import DATA_DIR, STAGES
+from metrics import DATA_DIR, DETAIL_STAGES, STAGES
 
 LABELS = {
     "vad_tail_ms": "VAD tail",
@@ -24,6 +25,9 @@ LABELS = {
     "ws_delivery_ms": "WS delivery",
     "playback_start_ms": "Playback start",
     "total_ms": "**Total**",
+    "tts_ttfb_ms": "TTS first byte (after text ready)",
+    "llm_ttft_ms": "LLM first token",
+    "first_sentence_ms": "LLM first sentence",
 }
 
 
@@ -48,9 +52,9 @@ def p90(values: list[float]) -> float:
 def main() -> None:
     paths = sys.argv[1:]
     if not paths:
-        candidates = sorted(glob.glob(os.path.join(DATA_DIR, "N1-*.csv")), key=os.path.getmtime)
+        candidates = sorted(glob.glob(os.path.join(DATA_DIR, "*.csv")), key=os.path.getmtime)
         if not candidates:
-            sys.exit(f"No N1-*.csv in {os.path.normpath(DATA_DIR)}")
+            sys.exit(f"No CSV in {os.path.normpath(DATA_DIR)}")
         paths = [candidates[-1]]
 
     rows, skipped = load_rows(paths)
@@ -72,6 +76,20 @@ def main() -> None:
         median = statistics.median(values)
         share = "100%" if column == "total_ms" else f"{median / total_median:.0%}"
         print(f"| {LABELS[column]} | {median:.0f} | {p90(values):.0f} | {share} |")
+
+    detail = [(c, [float(r[c]) for r in rows if r.get(c)]) for c, _s, _e in DETAIL_STAGES]
+    detail = [(c, v) for c, v in detail if v]
+    if detail:
+        print()
+        print("| Streaming detail | Median (ms) | p90 (ms) |")
+        print("|---|---|---|")
+        for column, values in detail:
+            print(f"| {LABELS[column]} | {statistics.median(values):.0f} | {p90(values):.0f} |")
+    for column, label in (("chunks", "chunks per reply"), ("first_chunk_bytes", "first chunk bytes"),
+                          ("sentences", "sentences per reply")):
+        values = [float(r[column]) for r in rows if r.get(column)]
+        if values:
+            print(f"{label}: median {statistics.median(values):.0f}, p90 {p90(values):.0f}")
 
     ws_bytes = [float(r["ws_bytes"]) for r in rows if r.get("ws_bytes")]
     mp3_bytes = [float(r["mp3_bytes"]) for r in rows if r.get("mp3_bytes")]

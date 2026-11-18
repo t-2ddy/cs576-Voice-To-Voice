@@ -22,16 +22,25 @@ DATA_DIR = os.path.join(SERVER_DIR, "..", "findings", "data")
 RUN_STARTED = datetime.now()
 RUN_ID = RUN_STARTED.strftime("%Y-%m-%dT%H:%M:%S")
 
-# (column, start mark, end mark)
+# (column, start mark(s), end mark). A tuple of starts uses the first mark present.
+# With streaming (N3) audio_sent/recv are the first chunk, tts_done the last
+# byte, and play the start of audio, so total_ms keeps its N1 meaning.
 STAGES = (
     ("vad_tail_ms", "speech_end", "vad_end"),
     ("stt_ms", "vad_end", "stt_done"),
     ("memory_ms", "stt_done", "memory_done"),
     ("llm_ms", "memory_done", "llm_done"),
-    ("tts_ms", "llm_done", "tts_done"),
+    ("tts_ms", ("first_sentence", "llm_done"), "tts_done"),
     ("ws_delivery_ms", "audio_sent", "recv"),
     ("playback_start_ms", "recv", "play"),
     ("total_ms", "speech_end", "play"),
+)
+
+# Streaming detail (N3): these overlap the stages above, so they get no share of total.
+DETAIL_STAGES = (
+    ("tts_ttfb_ms", ("first_sentence", "llm_done"), "tts_first_byte"),
+    ("llm_ttft_ms", "memory_done", "llm_first_token"),
+    ("first_sentence_ms", "memory_done", "first_sentence"),
 )
 
 COLUMNS = [
@@ -44,6 +53,10 @@ COLUMNS = [
     *(name for name, _start, _end in STAGES),
     "ws_bytes",
     "tts_handshake_ms",
+    *(name for name, _start, _end in DETAIL_STAGES),
+    "chunks",
+    "first_chunk_bytes",
+    "sentences",
     "notes",
 ]
 
@@ -73,6 +86,9 @@ class TurnTimer:
         self.mp3_bytes = 0
         self.ws_bytes: int | None = None
         self.tts_handshake_ms: int | None = None
+        self.chunks: int | None = None
+        self.first_chunk_bytes: int | None = None
+        self.sentences = 0
         self.notes: list[str] = []
 
     def mark(self, name: str, at: float | None = None) -> None:
@@ -84,8 +100,11 @@ class TurnTimer:
 
     def durations(self) -> dict[str, int | None]:
         result: dict[str, int | None] = {}
-        for name, start, end in STAGES:
-            if start in self.marks and end in self.marks:
+        for name, starts, end in (*STAGES, *DETAIL_STAGES):
+            if isinstance(starts, str):
+                starts = (starts,)
+            start = next((s for s in starts if s in self.marks), None)
+            if start is not None and end in self.marks:
                 result[name] = round((self.marks[end] - self.marks[start]) * 1000)
             else:
                 result[name] = None
@@ -98,13 +117,21 @@ class TurnTimer:
             value = d[key]
             return "-" if value is None else str(value)
 
-        return (
+        line = (
             f"(latency: total {fmt('total_ms')} ms | vad {fmt('vad_tail_ms')} | "
             f"stt {fmt('stt_ms')} | mem {fmt('memory_ms')} | llm {fmt('llm_ms')} | "
             f"tts {fmt('tts_ms')} | ws {fmt('ws_delivery_ms')} | "
             f"play {fmt('playback_start_ms')} | tts handshake {self.tts_handshake_ms} | "
-            f"ws bytes {self.ws_bytes})"
+            f"ws bytes {self.ws_bytes}"
         )
+        if self.chunks is not None:
+            line += f" | tts ttfb {fmt('tts_ttfb_ms')} | chunks {self.chunks}"
+        if self.sentences:
+            line += (
+                f" | llm ttft {fmt('llm_ttft_ms')} | 1st sentence {fmt('first_sentence_ms')}"
+                f" | sentences {self.sentences}"
+            )
+        return line + ")"
 
     def write_row(self) -> str:
         """Append this turn to the CSV (header on first write); returns the path."""
@@ -126,6 +153,9 @@ class TurnTimer:
             **{k: ("" if v is None else v) for k, v in self.durations().items()},
             "ws_bytes": "" if self.ws_bytes is None else self.ws_bytes,
             "tts_handshake_ms": "" if self.tts_handshake_ms is None else self.tts_handshake_ms,
+            "chunks": "" if self.chunks is None else self.chunks,
+            "first_chunk_bytes": "" if self.first_chunk_bytes is None else self.first_chunk_bytes,
+            "sentences": self.sentences or "",
             "notes": ";".join(self.notes),
         }
         with open(path, "a", newline="", encoding="utf-8") as f:

@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections.abc import Iterator
 
 import httpx
 from dotenv import load_dotenv
@@ -42,6 +43,9 @@ ELEVENLABS_SPEAKER_BOOST = _env_bool("ELEVENLABS_SPEAKER_BOOST", True)
 
 API_BASE = "https://api.elevenlabs.io"
 TTS_URL_TEMPLATE = API_BASE + "/v1/text-to-speech/{voice_id}"
+TTS_STREAM_URL_TEMPLATE = TTS_URL_TEMPLATE + "/stream"
+# Same format as the non-streaming default, so N2 and N3 bytes are comparable.
+STREAM_OUTPUT_FORMAT = "mp3_44100_128"
 TTS_TIMEOUT_SECONDS = 60.0
 
 _http: httpx.Client | None = None
@@ -107,6 +111,42 @@ def extract_spoken_text(reply: str) -> str:
     else:
         spoken = " ".join(text.split()).strip()
     return _for_tts(spoken)
+
+
+def _check_config(text: str) -> None:
+    if not ELEVENLABS_API_KEY:
+        raise RuntimeError("Missing ELEVENLABS_API_KEY in server/.env")
+    if not ELEVENLABS_VOICE_ID:
+        raise RuntimeError("Missing ELEVENLABS_VOICE_ID in server/.env")
+    if not text or not text.strip():
+        raise RuntimeError("Cannot synthesize empty text")
+
+
+def _headers() -> dict[str, str]:
+    return {"xi-api-key": ELEVENLABS_API_KEY, "Accept": "audio/mpeg"}
+
+
+def _request_body(
+    text: str,
+    stability: float | None,
+    similarity_boost: float | None,
+    style: float | None,
+    speed: float | None,
+    speaker_boost: bool | None,
+) -> dict:
+    return {
+        "text": text.strip(),
+        "model_id": ELEVENLABS_MODEL_ID,
+        "voice_settings": {
+            "stability": stability if stability is not None else ELEVENLABS_STABILITY,
+            "similarity_boost": similarity_boost if similarity_boost is not None else ELEVENLABS_SIMILARITY_BOOST,
+            "style": style if style is not None else ELEVENLABS_STYLE,
+            "speed": speed if speed is not None else ELEVENLABS_SPEED,
+            "use_speaker_boost": speaker_boost if speaker_boost is not None else ELEVENLABS_SPEAKER_BOOST,
+        },
+    }
+
+
 def synthesize(
     text: str,
     stability: float | None = None,
@@ -116,34 +156,15 @@ def synthesize(
     speaker_boost: bool | None = None,
 ) -> bytes:
     """Return MP3 bytes for `text`. Raises RuntimeError on config/HTTP failure."""
-    if not ELEVENLABS_API_KEY:
-        raise RuntimeError("Missing ELEVENLABS_API_KEY in server/.env")
-    if not ELEVENLABS_VOICE_ID:
-        raise RuntimeError("Missing ELEVENLABS_VOICE_ID in server/.env")
-    if not text or not text.strip():
-        raise RuntimeError("Cannot synthesize empty text")
-    url = TTS_URL_TEMPLATE.format(voice_id=ELEVENLABS_VOICE_ID)
-    voice_settings = {
-        "stability": stability if stability is not None else ELEVENLABS_STABILITY,
-        "similarity_boost": similarity_boost if similarity_boost is not None else ELEVENLABS_SIMILARITY_BOOST,
-        "style": style if style is not None else ELEVENLABS_STYLE,
-        "speed": speed if speed is not None else ELEVENLABS_SPEED,
-        "use_speaker_boost": speaker_boost if speaker_boost is not None else ELEVENLABS_SPEAKER_BOOST,
-    }
+    _check_config(text)
+    body = _request_body(text, stability, similarity_boost, style, speed, speaker_boost)
     global last_handshake_ms
     trace = _HandshakeTrace()
     try:
         response = _client().post(
-            url,
-            json={
-                "text": text.strip(),
-                "model_id": ELEVENLABS_MODEL_ID,
-                "voice_settings": voice_settings,
-            },
-            headers={
-                "xi-api-key": ELEVENLABS_API_KEY,
-                "Accept": "audio/mpeg",
-            },
+            TTS_URL_TEMPLATE.format(voice_id=ELEVENLABS_VOICE_ID),
+            json=body,
+            headers=_headers(),
             extensions={"trace": trace},
         )
     except httpx.HTTPError as exc:
@@ -155,3 +176,40 @@ def synthesize(
     if not audio:
         raise RuntimeError("ElevenLabs returned empty audio")
     return audio
+
+
+def synthesize_stream(text: str, previous_text: str | None = None) -> Iterator[bytes]:
+    """Yield MP3 chunks for `text` as ElevenLabs produces them (chunked HTTP response).
+
+    `previous_text` is the already-spoken part of the reply, so a sentence
+    synthesized on its own keeps the intonation of the whole reply.
+    Raises RuntimeError on config/HTTP failure.
+    """
+    _check_config(text)
+    body = _request_body(text, None, None, None, None, None)
+    if previous_text and previous_text.strip():
+        body["previous_text"] = previous_text.strip()
+    global last_handshake_ms
+    trace = _HandshakeTrace()
+    received = 0
+    try:
+        with _client().stream(
+            "POST",
+            TTS_STREAM_URL_TEMPLATE.format(voice_id=ELEVENLABS_VOICE_ID),
+            params={"output_format": STREAM_OUTPUT_FORMAT},
+            json=body,
+            headers=_headers(),
+            extensions={"trace": trace},
+        ) as response:
+            last_handshake_ms = trace.ms()
+            if response.status_code >= 400:
+                detail = response.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"ElevenLabs HTTP {response.status_code}: {detail}")
+            for chunk in response.iter_bytes():
+                if chunk:
+                    received += len(chunk)
+                    yield chunk
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"ElevenLabs request failed: {exc}") from exc
+    if not received:
+        raise RuntimeError("ElevenLabs returned empty audio")

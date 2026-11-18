@@ -8,6 +8,7 @@ Env (server/.env):
 
 import os
 import random
+from collections.abc import Iterator
 
 from openai import OpenAIError
 
@@ -38,8 +39,7 @@ def load_system_prompt() -> str:
         return ""
 
 
-def complete_chat(messages: list[dict], max_tokens: int | None = None) -> str:
-    """Send `messages` to LLM_MODEL and return the reply text."""
+def _chat_kwargs(messages: list[dict], max_tokens: int | None) -> dict:
     if not LLM_MODEL:
         raise RuntimeError("Missing LLM_MODEL in server/.env")
     kwargs = {"model": LLM_MODEL, "messages": messages}
@@ -47,11 +47,16 @@ def complete_chat(messages: list[dict], max_tokens: int | None = None) -> str:
         kwargs["reasoning_effort"] = LLM_REASONING_EFFORT
     if max_tokens is not None:
         kwargs["max_completion_tokens"] = max_tokens
-    response = get_openai_client().chat.completions.create(**kwargs)
+    return kwargs
+
+
+def complete_chat(messages: list[dict], max_tokens: int | None = None) -> str:
+    """Send `messages` to LLM_MODEL and return the reply text."""
+    response = get_openai_client().chat.completions.create(**_chat_kwargs(messages, max_tokens))
     return (response.choices[0].message.content or "").strip()
 
 
-def ask_openai(history: list[dict]) -> str:
+def _with_length_hint(history: list[dict]) -> tuple[list[dict], int]:
     preset = random.choices(LENGTH_PRESETS, weights=LENGTH_WEIGHTS)[0]
     # The per-turn length hint is folded into the leading system message for
     # this call only -- it is never persisted into `history`.
@@ -63,7 +68,26 @@ def ask_openai(history: list[dict]) -> str:
         }
     else:
         messages = [{"role": "system", "content": preset["hint"]}] + messages
-    return complete_chat(messages, max_tokens=preset["max_tokens"])
+    return messages, preset["max_tokens"]
+
+
+def ask_openai(history: list[dict]) -> str:
+    messages, max_tokens = _with_length_hint(history)
+    return complete_chat(messages, max_tokens=max_tokens)
+
+
+def ask_stream(history: list[dict]) -> Iterator[str]:
+    """Like ask_openai, but yields reply text deltas as the model produces them (SSE)."""
+    messages, max_tokens = _with_length_hint(history)
+    stream = get_openai_client().chat.completions.create(
+        **_chat_kwargs(messages, max_tokens), stream=True
+    )
+    try:
+        for event in stream:
+            if event.choices and event.choices[0].delta.content:
+                yield event.choices[0].delta.content
+    finally:
+        stream.close()
 
 
 class LocalModel:

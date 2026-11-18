@@ -22,11 +22,17 @@ See .cursor/rules/voice-to-voice.mdc for the overall architecture.
 """
 
 import os
+import queue
 import sys
+import threading
 import time
+from collections.abc import Iterator
 
 from chat_bridge import (
     emit_audio,
+    emit_audio_chunk,
+    emit_audio_end,
+    emit_audio_start,
     emit_chat,
     emit_status,
     get_playback_timing,
@@ -36,9 +42,10 @@ from chat_bridge import (
 )
 from chat_memory import build_context_if_needed, prune_recent_turns, store_turn
 import elevenlabs_tts
-from elevenlabs_tts import extract_spoken_text, synthesize
-from local_model import LocalModel
+from elevenlabs_tts import extract_spoken_text, synthesize, synthesize_stream
+from local_model import LocalModel, ask_stream
 from metrics import TurnTimer, csv_path
+from sentence_stream import SentenceSplitter
 from speechToText import SpeechToText
 
 # After this many assistant replies, archive overflow recent_turns into long-term memory.
@@ -53,6 +60,19 @@ ECHO_TAIL_SECONDS = float(os.getenv("ECHO_TAIL_SECONDS", "0.3") or 0)
 # after that many seconds and run terminal-only.
 UI_WAIT_SECONDS = float(os.getenv("UI_WAIT_SECONDS", "0") or 0)
 UI_WAIT_REMINDER_SECONDS = 15.0
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+# N3a: stream TTS audio chunks to the browser instead of sending one full clip.
+TTS_STREAMING = _env_flag("TTS_STREAMING", True)
+# N3b: stream the reply text and synthesize it sentence by sentence (needs TTS_STREAMING).
+LLM_STREAMING = _env_flag("LLM_STREAMING", True) and TTS_STREAMING
 
 
 def _wait_for_ui() -> None:
@@ -85,6 +105,93 @@ def _build_ask_history(persona: str, context: str, user_text: str) -> list[dict]
         history.append({"role": "system", "content": "\n\n".join(system_parts)})
     history.append({"role": "user", "content": user_text})
     return history
+
+
+class StreamedReply:
+    """Runs ask_stream in a thread and hands out complete sentences as they form (N3b)."""
+
+    _DONE = object()
+
+    def __init__(self, history: list[dict], timer: TurnTimer) -> None:
+        self._timer = timer
+        self._queue: queue.Queue = queue.Queue()
+        self.parts: list[str] = []
+        self.error: Exception | None = None
+        threading.Thread(target=self._produce, args=(history,), daemon=True).start()
+
+    def _produce(self, history: list[dict]) -> None:
+        splitter = SentenceSplitter()
+        try:
+            for delta in ask_stream(history):
+                if not self.parts:
+                    self._timer.mark("llm_first_token")
+                self.parts.append(delta)
+                for sentence in splitter.feed(delta):
+                    self._queue.put(sentence)
+            for sentence in splitter.flush():
+                self._queue.put(sentence)
+        except Exception as exc:  # surfaced to the main loop via self.error
+            self.error = exc
+        finally:
+            self._timer.mark("llm_done")
+            self._queue.put(self._DONE)
+
+    def sentences(self) -> Iterator[str]:
+        while True:
+            item = self._queue.get()
+            if item is self._DONE:
+                return
+            if "first_sentence" not in self._timer.marks:
+                self._timer.mark("first_sentence")
+            self._timer.sentences += 1
+            yield item
+
+    @property
+    def text(self) -> str:
+        return "".join(self.parts).strip()
+
+
+def _stream_speech(sentences: Iterator[str], timer: TurnTimer, show_text: bool) -> int:
+    """Synthesize each sentence with streaming TTS into one audio_start/audio_end stream.
+
+    show_text=True live-updates the UI textbox with the reply so far (N3b).
+    Returns total MP3 bytes sent (0 if nothing was spoken).
+    """
+    stream_id: int | None = None
+    total = chunks = 0
+    shown: list[str] = []
+    spoken_so_far = ""
+    for sentence in sentences:
+        shown.append(sentence)
+        if show_text:
+            emit_chat("frieren", " ".join(shown))
+        spoken = extract_spoken_text(sentence)
+        if not spoken:
+            continue
+        try:
+            for chunk in synthesize_stream(spoken, previous_text=spoken_so_far or None):
+                if stream_id is None:
+                    timer.mark("tts_first_byte")
+                    timer.tts_handshake_ms = elevenlabs_tts.last_handshake_ms
+                    emit_status("speaking")
+                    stream_id = emit_audio_start()
+                    timer.mark("audio_sent")
+                    timer.first_chunk_bytes = len(chunk)
+                emit_audio_chunk(chunk)
+                total += len(chunk)
+                chunks += 1
+        except RuntimeError as exc:
+            print(f"(ElevenLabs TTS failed: {exc})", file=sys.stderr)
+            emit_status("error", f"TTS failed: {exc}")
+            timer.note("tts_failed")
+            break
+        spoken_so_far = f"{spoken_so_far} {spoken}".strip()
+    if stream_id is not None:
+        timer.mark("tts_done")
+        emit_audio_end(stream_id, total, chunks)
+    timer.mp3_bytes = timer.ws_bytes = total
+    timer.chunks = chunks
+    return total
 
 
 def main() -> None:
@@ -151,37 +258,58 @@ def main() -> None:
                     timer.memory_mode = memory_mode
                     print(f"(memory: {memory_mode})")
                     ask_history = _build_ask_history(persona, context, text)
-                    reply = local_model.ask(ask_history)
-                    timer.mark("llm_done")
+                    streamed = StreamedReply(ask_history, timer) if LLM_STREAMING else None
+                    reply = "" if streamed else local_model.ask(ask_history)
+                    if not streamed:
+                        timer.mark("llm_done")
                 except Exception as exc:
                     print(f"(chat/memory request failed: {exc})", file=sys.stderr)
                     emit_status("error", str(exc))
                     continue
-                timer.reply_chars = len(reply)
 
-                print(f"Frieren: {reply}")
-                spoken = extract_spoken_text(reply)
-                mp3: bytes | None = None
-                if spoken:
-                    try:
-                        mp3 = synthesize(spoken)
-                        timer.mark("tts_done")
-                        timer.tts_handshake_ms = elevenlabs_tts.last_handshake_ms
-                    except Exception as exc:
-                        print(f"(ElevenLabs TTS failed: {exc})", file=sys.stderr)
-                        emit_status("error", f"TTS failed: {exc}")
-                else:
-                    print("(empty spoken text; skipping TTS)", file=sys.stderr)
-
-                if mp3:
-                    timer.mp3_bytes = len(mp3)
-                    emit_status("speaking")
+                audio_bytes = 0
+                spoken = ""
+                chat_shown = False
+                if streamed:
+                    audio_bytes = _stream_speech(streamed.sentences(), timer, show_text=True)
+                    reply = streamed.text
+                    if streamed.error is not None:
+                        print(f"(chat stream failed: {streamed.error})", file=sys.stderr)
+                        emit_status("error", str(streamed.error))
+                        if not reply:
+                            continue
+                    spoken = extract_spoken_text(reply)
                     emit_chat("frieren", reply)
-                    timer.mark("audio_sent")
-                    timer.ws_bytes = emit_audio(mp3)
+                    chat_shown = True
+                else:
+                    spoken = extract_spoken_text(reply)
+                    if not spoken:
+                        print("(empty spoken text; skipping TTS)", file=sys.stderr)
+                    elif TTS_STREAMING:
+                        emit_chat("frieren", reply)
+                        chat_shown = True
+                        audio_bytes = _stream_speech(iter([reply]), timer, show_text=False)
+                    else:
+                        try:
+                            mp3 = synthesize(spoken)
+                            timer.mark("tts_done")
+                            timer.tts_handshake_ms = elevenlabs_tts.last_handshake_ms
+                            timer.mp3_bytes = audio_bytes = len(mp3)
+                            emit_status("speaking")
+                            emit_chat("frieren", reply)
+                            chat_shown = True
+                            timer.mark("audio_sent")
+                            timer.ws_bytes = emit_audio(mp3)
+                        except Exception as exc:
+                            print(f"(ElevenLabs TTS failed: {exc})", file=sys.stderr)
+                            emit_status("error", f"TTS failed: {exc}")
+                timer.reply_chars = len(reply)
+                print(f"Frieren: {reply}")
+
+                if audio_bytes:
                     # Half-duplex: don't listen while the reply plays, or the mic
                     # hears Frieren through the speakers and she answers herself.
-                    timeout = len(mp3) / MP3_BYTES_PER_SECOND + PLAYBACK_GRACE_SECONDS
+                    timeout = audio_bytes / MP3_BYTES_PER_SECOND + PLAYBACK_GRACE_SECONDS
                     played = wait_for_playback(timeout)
                     if played and ECHO_TAIL_SECONDS > 0:
                         time.sleep(ECHO_TAIL_SECONDS)
@@ -196,7 +324,8 @@ def main() -> None:
                         timer.note("no_playback_report" if played else "no_ui_or_timeout")
                 else:
                     timer.note("tts_failed" if spoken else "no_tts")
-                    emit_chat("frieren", reply)
+                    if not chat_shown:
+                        emit_chat("frieren", reply)
 
                 print(timer.summary())
                 try:

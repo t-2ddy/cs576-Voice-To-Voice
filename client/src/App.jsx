@@ -218,9 +218,11 @@ function useChatBridge() {
     let closed = false
     let probing = false
     let connectStartedAt = 0
+    let stream = null
     const retryTimer = createWorkerTimer()
 
     const stopAudio = () => {
+      stream = null
       if (audioRef.current) {
         audioRef.current.pause()
         audioRef.current = null
@@ -238,15 +240,16 @@ function useChatBridge() {
     }
 
     // Tells the server it can start listening again (it mutes the mic while we play).
-    const sendPlaybackDone = () => {
+    // `streamId` tags reports for N3 streams; the server ignores untagged ones mid-stream.
+    const sendPlaybackDone = (streamId) => {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'playback_done' }))
+        ws.send(JSON.stringify({ type: 'playback_done', ...(streamId ? { stream: streamId } : {}) }))
       }
     }
 
     // N1 latency: when the clip arrived and when sound actually started (Date.now()
     // shares the server's clock only when both run on the same machine).
-    const sendPlaybackStarted = (recvTs, blocked) => {
+    const sendPlaybackStarted = (recvTs, blocked, streamId) => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(
           JSON.stringify({
@@ -254,6 +257,7 @@ function useChatBridge() {
             recv_ts: recvTs,
             play_ts: Date.now(),
             ...(blocked ? { blocked: true } : {}),
+            ...(streamId ? { stream: streamId } : {}),
           }),
         )
       }
@@ -282,52 +286,162 @@ function useChatBridge() {
       return bytes
     }
 
-    // `bytes` is an ArrayBuffer (binary WS frame) or Uint8Array (decoded base64).
-    const playMp3 = (bytes, recvTs = Date.now(), blocked = false) => {
+    // Shared by full clips and streams. `info.recvTs` is when the first audio
+    // bytes arrived; `info.blocked` marks a play that waited for a click;
+    // `info.id` is the stream id (undefined for full clips).
+    const attachPlaybackHandlers = (audio, info) => {
+      audio.addEventListener(
+        'playing',
+        () => sendPlaybackStarted(info.recvTs, info.blocked, info.id),
+        { once: true },
+      )
+      audio.onended = () => {
+        stopAudio()
+        pendingAudioRef.current = null
+        setStatus((s) => (s === 'speaking' ? 'ready' : s))
+        sendPlaybackDone(info.id)
+      }
+      audio.onerror = () => {
+        stopAudio()
+        pendingAudioRef.current = null
+        fail('Audio playback failed')
+        sendPlaybackDone(info.id)
+      }
+    }
+
+    // On autoplay refusal, `replay` is kept and run on the next click/key.
+    const startPlayback = (audio, info, replay) => {
+      void audio.play().catch((err) => {
+        if (audioRef.current !== audio) return
+        const autoplayBlocked =
+          err?.name === 'NotAllowedError' ||
+          /not allowed|user.*denied|interact/i.test(err?.message || '')
+        if (autoplayBlocked) {
+          pendingAudioRef.current = replay
+          setStatus('error')
+          setStatusDetail('Click the window to enable audio')
+          setLastError('Click the window to enable audio')
+          return
+        }
+        stopAudio()
+        fail(err?.message || 'Audio play blocked')
+        sendPlaybackDone(info.id)
+      })
+    }
+
+    // `bytes` is an ArrayBuffer (binary WS frame), Uint8Array (decoded base64),
+    // or an array of chunks (stream fallback, with its stream `id`).
+    const playMp3 = (bytes, recvTs = Date.now(), blocked = false, id = undefined) => {
       stopAudio()
       pendingAudioRef.current = null
+      const info = { recvTs, blocked, id }
       try {
-        const blob = new Blob([bytes], { type: 'audio/mpeg' })
+        const blob = new Blob(Array.isArray(bytes) ? bytes : [bytes], { type: 'audio/mpeg' })
         const url = URL.createObjectURL(blob)
         objectUrlRef.current = url
         const audio = new Audio(url)
         audioRef.current = audio
         setStatus('speaking')
-        audio.addEventListener('playing', () => sendPlaybackStarted(recvTs, blocked), {
-          once: true,
-        })
-        audio.onended = () => {
-          stopAudio()
-          pendingAudioRef.current = null
-          setStatus((s) => (s === 'speaking' ? 'ready' : s))
-          sendPlaybackDone()
-        }
-        audio.onerror = () => {
-          stopAudio()
-          pendingAudioRef.current = null
-          fail('Audio playback failed')
-          sendPlaybackDone()
-        }
-        void audio.play().catch((err) => {
-          const autoplayBlocked =
-            err?.name === 'NotAllowedError' ||
-            /not allowed|user.*denied|interact/i.test(err?.message || '')
-          if (autoplayBlocked) {
-            // Keep the clip; next user gesture will replay it.
-            pendingAudioRef.current = { bytes, recvTs }
-            setStatus('error')
-            setStatusDetail('Click the window to enable audio')
-            setLastError('Click the window to enable audio')
-            return
-          }
-          stopAudio()
-          fail(err?.message || 'Audio play blocked')
-          sendPlaybackDone()
-        })
+        attachPlaybackHandlers(audio, info)
+        startPlayback(audio, info, () => playMp3(bytes, recvTs, true, id))
       } catch (err) {
         stopAudio()
         fail(err?.message || 'Invalid audio payload')
-        sendPlaybackDone()
+        sendPlaybackDone(id)
+      }
+    }
+
+    // N3 streamed replies: audio_start, binary MP3 chunks, audio_end. MediaSource
+    // plays chunks as they arrive; without MP3 support in MSE (some Firefox
+    // builds) the chunks are collected and played as one clip at audio_end.
+    const startStream = (id) => {
+      stopAudio()
+      pendingAudioRef.current = null
+      const s = { id, recvTs: null, blocked: false, chunks: [], queue: [], ended: false }
+      stream = s
+      const mseOk = typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('audio/mpeg')
+      if (!mseOk) return
+      try {
+        const ms = new MediaSource()
+        const url = URL.createObjectURL(ms)
+        objectUrlRef.current = url
+        const audio = new Audio(url)
+        audioRef.current = audio
+        s.ms = ms
+        s.audio = audio
+        attachPlaybackHandlers(audio, s)
+        ms.addEventListener(
+          'sourceopen',
+          () => {
+            if (stream !== s) return
+            try {
+              s.sb = ms.addSourceBuffer('audio/mpeg')
+              s.sb.mode = 'sequence'
+              s.sb.addEventListener('updateend', () => pumpStream(s))
+              pumpStream(s)
+            } catch (err) {
+              fallBackToClip(s, err)
+            }
+          },
+          { once: true },
+        )
+      } catch (err) {
+        fallBackToClip(s, err)
+      }
+    }
+
+    const fallBackToClip = (s, err) => {
+      console.warn('MediaSource playback unavailable, playing at audio_end', err)
+      if (audioRef.current === s.audio) stopAudio()
+      s.ms = s.sb = s.audio = null
+      stream = s
+      if (s.ended) finishStream(s)
+    }
+
+    const pumpStream = (s) => {
+      if (stream !== s || !s.sb || s.sb.updating) return
+      if (s.queue.length) {
+        try {
+          s.sb.appendBuffer(s.queue.shift())
+        } catch (err) {
+          fallBackToClip(s, err)
+          return
+        }
+        if (!s.playRequested) {
+          s.playRequested = true
+          setStatus('speaking')
+          startPlayback(s.audio, s, () => {
+            s.blocked = true
+            if (audioRef.current === s.audio) startPlayback(s.audio, s, () => {})
+          })
+        }
+        return
+      }
+      if (s.ended && s.ms.readyState === 'open') s.ms.endOfStream()
+    }
+
+    const onStreamChunk = (s, data, recvTs) => {
+      if (s.recvTs === null) s.recvTs = recvTs
+      s.chunks.push(data)
+      if (s.sb) {
+        s.queue.push(data)
+        pumpStream(s)
+      } else if (s.ms) {
+        s.queue.push(data)
+      }
+    }
+
+    const finishStream = (s) => {
+      s.ended = true
+      if (s.ms) {
+        pumpStream(s)
+        return
+      }
+      stream = null
+      if (s.chunks.length) {
+        playMp3(s.chunks, s.recvTs ?? Date.now(), false, s.id)
+      } else {
+        sendPlaybackDone(s.id)
       }
     }
 
@@ -412,9 +526,11 @@ function useChatBridge() {
 
       sock.onmessage = (event) => {
         const recvTs = Date.now()
-        // Binary frames carry the MP3 announced by the preceding `audio` header.
+        // Binary frames are chunks of the current stream (N3), or the whole MP3
+        // announced by a preceding `audio` header.
         if (event.data instanceof ArrayBuffer) {
-          playMp3(event.data, recvTs)
+          if (stream && !stream.ended) onStreamChunk(stream, event.data, recvTs)
+          else playMp3(event.data, recvTs)
           return
         }
         let data
@@ -426,8 +542,13 @@ function useChatBridge() {
         if (data.type === 'chat' && data.text) {
           if (data.who === 'you') setLastError('')
           setLine({ who: data.who === 'you' ? 'you' : 'frieren', text: data.text })
-        } else if (data.type === 'audio' && data.data) {
-          playMp3(base64ToBytes(data.data), recvTs)
+        } else if (data.type === 'audio_start') {
+          startStream(data.stream)
+        } else if (data.type === 'audio_end') {
+          if (stream && stream.id === data.stream) finishStream(stream)
+        } else if (data.type === 'audio') {
+          if (data.data) playMp3(base64ToBytes(data.data), recvTs)
+          else stream = null
         } else if (data.type === 'status' && data.value) {
           // Don't let a quick server "ready" clobber local speaking while audio plays.
           if (data.value === 'ready' && audioRef.current && !audioRef.current.paused) {
@@ -464,10 +585,10 @@ function useChatBridge() {
 
     const onUserGesture = () => {
       unlockAudio()
-      const pending = pendingAudioRef.current
-      if (pending) {
+      const replay = pendingAudioRef.current
+      if (replay) {
         pendingAudioRef.current = null
-        playMp3(pending.bytes, pending.recvTs, true)
+        replay()
       }
     }
 

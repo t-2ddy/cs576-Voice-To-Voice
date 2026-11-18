@@ -6,12 +6,17 @@ Clients receive JSON events:
   {"type": "audio", "format": "mp3", "encoding": "binary", "bytes": N}
       -- followed immediately by one binary frame holding the N MP3 bytes
   {"type": "audio", "format": "mp3", "data": "<base64>"}  -- when WS_AUDIO_BINARY=0
+  {"type": "audio_start", "format": "mp3", "stream": id}
+      -- streamed reply (N3): one binary frame per MP3 chunk follows, then
+  {"type": "audio_end", "stream": id, "bytes": N, "chunks": k}
   {"type": "status", "value": "listening"|"thinking"|"speaking"|"ready"|"error", "detail"?: "..."}
 Clients may send:
-  {"type": "playback_started", "recv_ts": <ms>, "play_ts": <ms>, "blocked"?: true}
-      -- the last `audio` clip arrived at recv_ts and began playing at play_ts
-         (browser Date.now(); blocked = autoplay held it until a click)
-  {"type": "playback_done"}  -- the last `audio` clip finished (or failed) playing
+  {"type": "playback_started", "recv_ts": <ms>, "play_ts": <ms>, "blocked"?: true, "stream"?: id}
+      -- the last `audio` clip (or first stream chunk) arrived at recv_ts and
+         began playing at play_ts (browser Date.now(); blocked = autoplay held
+         it until a click)
+  {"type": "playback_done", "stream"?: id}  -- the last clip/stream finished (or failed)
+  While a stream is current, reports without its id are ignored.
 
 Env (server/.env), read when the bridge starts / sends audio:
   WS_AUDIO_BINARY  (default 1; 0 = legacy base64-in-JSON audio)
@@ -46,6 +51,8 @@ _start_error: BaseException | None = None
 _lock = threading.Lock()
 _playback_done = threading.Event()
 _playback_timing: dict[str, Any] | None = None
+_stream_id = 0
+_current_stream: int | None = None
 _client_connected = threading.Event()
 _last_status: dict[str, Any] | None = None
 _last_chat: dict[str, dict[str, Any]] = {}
@@ -61,6 +68,12 @@ def _handle_client_message(raw: str | bytes) -> None:
     if not isinstance(event, dict):
         return
     event_type = event.get("type")
+    with _lock:
+        current = _current_stream
+    if current is not None and event.get("stream") != current:
+        # During a stream, only reports tagged with its id count; a stale or
+        # second tab must not unmute the mic while the reply still plays.
+        return
     if event_type == "playback_done":
         _playback_done.set()
     elif event_type == "playback_started":
@@ -173,10 +186,11 @@ def emit_audio(mp3_bytes: bytes) -> int:
     Binary mode sends a small JSON header then the raw MP3 as one binary frame;
     legacy mode (WS_AUDIO_BINARY=0) sends base64 inside a single JSON message.
     """
-    global _playback_timing
+    global _playback_timing, _current_stream
     _playback_done.clear()
     with _lock:
         _playback_timing = None
+        _current_stream = None
     if _env_flag("WS_AUDIO_BINARY", True):
         header = json.dumps(
             {"type": "audio", "format": "mp3", "encoding": "binary", "bytes": len(mp3_bytes)}
@@ -192,6 +206,30 @@ def emit_audio(mp3_bytes: bytes) -> int:
     )
     _schedule("audio", [payload])
     return len(payload)
+
+
+def emit_audio_start() -> int:
+    """Begin a streamed reply; returns the stream id. Chunks follow via emit_audio_chunk."""
+    global _playback_timing, _stream_id, _current_stream
+    _playback_done.clear()
+    with _lock:
+        _playback_timing = None
+        _stream_id += 1
+        stream_id = _current_stream = _stream_id
+    _schedule("audio_start", [json.dumps({"type": "audio_start", "format": "mp3", "stream": stream_id})])
+    return stream_id
+
+
+def emit_audio_chunk(chunk: bytes) -> None:
+    """Send one MP3 chunk of the current stream as a binary frame."""
+    _schedule("audio", [chunk])
+
+
+def emit_audio_end(stream_id: int, total_bytes: int, chunks: int) -> None:
+    _schedule(
+        "audio_end",
+        [json.dumps({"type": "audio_end", "stream": stream_id, "bytes": total_bytes, "chunks": chunks})],
+    )
 
 
 def wait_for_playback(timeout: float) -> bool:
