@@ -6,6 +6,9 @@ Clients receive JSON events:
   {"type": "audio", "format": "mp3", "data": "<base64>"}
   {"type": "status", "value": "listening"|"thinking"|"speaking"|"ready"|"error", "detail"?: "..."}
 Clients may send:
+  {"type": "playback_started", "recv_ts": <ms>, "play_ts": <ms>, "blocked"?: true}
+      -- the last `audio` clip arrived at recv_ts and began playing at play_ts
+         (browser Date.now(); blocked = autoplay held it until a click)
   {"type": "playback_done"}  -- the last `audio` clip finished (or failed) playing
 """
 
@@ -34,6 +37,7 @@ _server_ready = threading.Event()
 _start_error: BaseException | None = None
 _lock = threading.Lock()
 _playback_done = threading.Event()
+_playback_timing: dict[str, Any] | None = None
 _client_connected = threading.Event()
 _last_status: dict[str, Any] | None = None
 _last_chat: dict[str, dict[str, Any]] = {}
@@ -41,12 +45,25 @@ _warned_no_client: set[str] = set()
 
 
 def _handle_client_message(raw: str | bytes) -> None:
+    global _playback_timing
     try:
         event = json.loads(raw)
     except (TypeError, ValueError):
         return
-    if isinstance(event, dict) and event.get("type") == "playback_done":
+    if not isinstance(event, dict):
+        return
+    event_type = event.get("type")
+    if event_type == "playback_done":
         _playback_done.set()
+    elif event_type == "playback_started":
+        recv_ts, play_ts = event.get("recv_ts"), event.get("play_ts")
+        if isinstance(recv_ts, (int, float)) and isinstance(play_ts, (int, float)):
+            with _lock:
+                _playback_timing = {
+                    "recv": recv_ts / 1000,
+                    "play": play_ts / 1000,
+                    "blocked": bool(event.get("blocked")),
+                }
 
 
 def _remember_event(event: dict[str, Any]) -> None:
@@ -133,7 +150,10 @@ def emit_chat(who: str, text: str) -> None:
 
 def emit_audio(mp3_bytes: bytes) -> None:
     """Broadcast MP3 audio as base64 for the React client to play."""
+    global _playback_timing
     _playback_done.clear()
+    with _lock:
+        _playback_timing = None
     broadcast(
         {
             "type": "audio",
@@ -151,6 +171,12 @@ def wait_for_playback(timeout: float) -> bool:
     if not _clients:
         return False
     return _playback_done.wait(timeout)
+
+
+def get_playback_timing() -> dict[str, Any] | None:
+    """Client timing for the last emit_audio: {"recv", "play"} in seconds, plus "blocked"."""
+    with _lock:
+        return dict(_playback_timing) if _playback_timing else None
 
 
 def wait_for_client(timeout: float) -> bool:

@@ -11,12 +11,14 @@ import io
 import os
 import queue
 import sys
+import time
 import unicodedata
 import wave
 
 import numpy as np
 import sounddevice as sd
 
+from metrics import TurnTimer
 from openai_client import get_openai_client
 
 
@@ -74,8 +76,14 @@ def calibrate_noise_floor(frame_queue: queue.Queue) -> float:
     return threshold
 
 
-def record_utterance(frame_queue: queue.Queue, threshold: float) -> np.ndarray | None:
-    """Blocks until a full utterance (speech surrounded by silence) is captured."""
+def record_utterance(
+    frame_queue: queue.Queue, threshold: float
+) -> tuple[np.ndarray, float] | None:
+    """Blocks until a full utterance (speech surrounded by silence) is captured.
+
+    Returns (audio, speech_end) where speech_end is the wall-clock time of the
+    last loud frame, or None if the utterance was too short.
+    """
     pre_buffer_frames = max(1, PRE_BUFFER_MS // FRAME_MS)
     silence_end_frames = max(1, SILENCE_END_MS // FRAME_MS)
     max_frames = (MAX_UTTERANCE_SECONDS * 1000) // FRAME_MS
@@ -110,6 +118,7 @@ def record_utterance(frame_queue: queue.Queue, threshold: float) -> np.ndarray |
             print("(max utterance length reached, cutting off)")
             end_reason = "max length"
             break
+    speech_end = time.time() - silence_streak * FRAME_MS / 1000
 
     audio = np.concatenate(recorded)
     duration = len(audio) / SAMPLE_RATE
@@ -122,7 +131,7 @@ def record_utterance(frame_queue: queue.Queue, threshold: float) -> np.ndarray |
         )
     if too_short:
         return None
-    return audio
+    return audio, speech_end
 
 
 def _to_wav_bytes(audio_int16: np.ndarray) -> bytes:
@@ -226,9 +235,16 @@ class SpeechToText:
             except queue.Empty:
                 return
 
-    def listen_for_utterance(self) -> str | None:
+    def listen_for_utterance(self, timer: TurnTimer | None = None) -> str | None:
         """Blocks until one utterance is captured, returns its transcript (or None if too short)."""
-        audio = record_utterance(self._frame_queue, self._threshold)
-        if audio is None:
+        captured = record_utterance(self._frame_queue, self._threshold)
+        if captured is None:
             return None
-        return transcribe(audio)
+        audio, speech_end = captured
+        if timer is not None:
+            timer.mark("speech_end", speech_end)
+            timer.mark("vad_end")
+        text = transcribe(audio)
+        if timer is not None:
+            timer.mark("stt_done")
+        return text

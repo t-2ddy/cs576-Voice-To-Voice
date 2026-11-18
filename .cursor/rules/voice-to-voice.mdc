@@ -53,8 +53,10 @@ Server → client:
 ```
 Client → server:
 ```json
+{"type": "playback_started", "recv_ts": 1763420000000, "play_ts": 1763420000045}
 {"type": "playback_done"}
 ```
+`playback_started` (N1) carries browser `Date.now()` timestamps for when the `audio` message arrived and when sound started (`"blocked": true` if autoplay held it until a click). `voice_chat.py` combines them with server stage marks (`server/metrics.py`) into one CSV row per turn in `findings/data/`; `server/metrics_summary.py` prints median / p90 per stage.
 **Half-duplex turn-taking**: after emitting `audio`, `voice_chat.py` waits (`chat_bridge.wait_for_playback`) for `playback_done` before listening again, then flushes queued mic frames so Frieren's voice from the speakers isn't transcribed as the user. Fallback timeout = estimated clip length (128 kbps MP3) + 3 s; no wait when no UI is connected. The user cannot interrupt (barge-in) while she speaks.
 
 Errors: the client keeps the last error visible in the status bar until the next user turn.

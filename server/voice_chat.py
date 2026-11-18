@@ -15,6 +15,7 @@ Compartmentalized into:
 - chat_memory.py — Supabase four-tier memory (store / build_context_if_needed / prune)
 - chat_bridge.py — WebSocket broadcast to the UI
 - elevenlabs_tts.py — ElevenLabs REST TTS for character replies
+- metrics.py — per-turn stage timing and the N1 latency CSV
 - voice_chat.py (this file) — wires the services and runs the loop
 
 See .cursor/rules/voice-to-voice.mdc for the overall architecture.
@@ -28,6 +29,7 @@ from chat_bridge import (
     emit_audio,
     emit_chat,
     emit_status,
+    get_playback_timing,
     start_chat_bridge,
     wait_for_client,
     wait_for_playback,
@@ -35,6 +37,7 @@ from chat_bridge import (
 from chat_memory import build_context_if_needed, prune_recent_turns, store_turn
 from elevenlabs_tts import extract_spoken_text, synthesize
 from local_model import LocalModel
+from metrics import TurnTimer, csv_path
 from speechToText import SpeechToText
 
 # After this many assistant replies, archive overflow recent_turns into long-term memory.
@@ -110,21 +113,26 @@ def main() -> None:
     except Exception as exc:
         print(f"(startup archive failed: {exc})", file=sys.stderr)
 
+    print(f"Latency log: {csv_path()}")
     persona = local_model.system_prompt
     assistant_turns = 0
+    turn_number = 0
 
     with SpeechToText() as stt:
         try:
             while True:
                 emit_status("listening")
+                timer = TurnTimer(turn_number + 1)
                 try:
-                    text = stt.listen_for_utterance()
+                    text = stt.listen_for_utterance(timer)
                 except Exception as exc:
                     print(f"(speech-to-text request failed: {exc})", file=sys.stderr)
                     emit_status("error", f"STT failed: {exc}")
                     continue
                 if not text:
                     continue
+                turn_number += 1
+                timer.user_chars = len(text)
 
                 print(f"You: {text}")
                 emit_chat("you", text)
@@ -132,13 +140,17 @@ def main() -> None:
                 try:
                     emit_status("thinking")
                     context, memory_mode = build_context_if_needed(text)
+                    timer.mark("memory_done")
+                    timer.memory_mode = memory_mode
                     print(f"(memory: {memory_mode})")
                     ask_history = _build_ask_history(persona, context, text)
                     reply = local_model.ask(ask_history)
+                    timer.mark("llm_done")
                 except Exception as exc:
                     print(f"(chat/memory request failed: {exc})", file=sys.stderr)
                     emit_status("error", str(exc))
                     continue
+                timer.reply_chars = len(reply)
 
                 print(f"Frieren: {reply}")
                 spoken = extract_spoken_text(reply)
@@ -146,6 +158,7 @@ def main() -> None:
                 if spoken:
                     try:
                         mp3 = synthesize(spoken)
+                        timer.mark("tts_done")
                     except Exception as exc:
                         print(f"(ElevenLabs TTS failed: {exc})", file=sys.stderr)
                         emit_status("error", f"TTS failed: {exc}")
@@ -153,17 +166,35 @@ def main() -> None:
                     print("(empty spoken text; skipping TTS)", file=sys.stderr)
 
                 if mp3:
+                    timer.mp3_bytes = len(mp3)
                     emit_status("speaking")
                     emit_chat("frieren", reply)
+                    timer.mark("audio_sent")
                     emit_audio(mp3)
                     # Half-duplex: don't listen while the reply plays, or the mic
                     # hears Frieren through the speakers and she answers herself.
                     timeout = len(mp3) / MP3_BYTES_PER_SECOND + PLAYBACK_GRACE_SECONDS
-                    if wait_for_playback(timeout) and ECHO_TAIL_SECONDS > 0:
+                    played = wait_for_playback(timeout)
+                    if played and ECHO_TAIL_SECONDS > 0:
                         time.sleep(ECHO_TAIL_SECONDS)
                     stt.flush()
+                    playback = get_playback_timing()
+                    if playback:
+                        timer.mark("recv", playback["recv"])
+                        timer.mark("play", playback["play"])
+                        if playback["blocked"]:
+                            timer.note("autoplay_blocked")
+                    else:
+                        timer.note("no_playback_report" if played else "no_ui_or_timeout")
                 else:
+                    timer.note("tts_failed" if spoken else "no_tts")
                     emit_chat("frieren", reply)
+
+                print(timer.summary())
+                try:
+                    timer.write_row()
+                except OSError as exc:
+                    print(f"(failed to write metrics CSV: {exc})", file=sys.stderr)
 
                 try:
                     store_turn("user", text)

@@ -244,6 +244,21 @@ function useChatBridge() {
       }
     }
 
+    // N1 latency: when the clip arrived and when sound actually started (Date.now()
+    // shares the server's clock only when both run on the same machine).
+    const sendPlaybackStarted = (recvTs, blocked) => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: 'playback_started',
+            recv_ts: recvTs,
+            play_ts: Date.now(),
+            ...(blocked ? { blocked: true } : {}),
+          }),
+        )
+      }
+    }
+
     const unlockAudio = () => {
       if (audioUnlockedRef.current) return
       audioUnlockedRef.current = true
@@ -258,7 +273,7 @@ function useChatBridge() {
       }
     }
 
-    const playMp3Base64 = (b64) => {
+    const playMp3Base64 = (b64, recvTs = Date.now(), blocked = false) => {
       stopAudio()
       pendingAudioRef.current = null
       try {
@@ -273,6 +288,9 @@ function useChatBridge() {
         const audio = new Audio(url)
         audioRef.current = audio
         setStatus('speaking')
+        audio.addEventListener('playing', () => sendPlaybackStarted(recvTs, blocked), {
+          once: true,
+        })
         audio.onended = () => {
           stopAudio()
           pendingAudioRef.current = null
@@ -291,7 +309,7 @@ function useChatBridge() {
             /not allowed|user.*denied|interact/i.test(err?.message || '')
           if (blocked) {
             // Keep the clip; next user gesture will replay it.
-            pendingAudioRef.current = b64
+            pendingAudioRef.current = { b64, recvTs }
             setStatus('error')
             setStatusDetail('Click the window to enable audio')
             setLastError('Click the window to enable audio')
@@ -387,6 +405,7 @@ function useChatBridge() {
       }
 
       sock.onmessage = (event) => {
+        const recvTs = Date.now()
         let data
         try {
           data = JSON.parse(event.data)
@@ -397,7 +416,7 @@ function useChatBridge() {
           if (data.who === 'you') setLastError('')
           setLine({ who: data.who === 'you' ? 'you' : 'frieren', text: data.text })
         } else if (data.type === 'audio' && data.data) {
-          playMp3Base64(data.data)
+          playMp3Base64(data.data, recvTs)
         } else if (data.type === 'status' && data.value) {
           // Don't let a quick server "ready" clobber local speaking while audio plays.
           if (data.value === 'ready' && audioRef.current && !audioRef.current.paused) {
@@ -437,7 +456,7 @@ function useChatBridge() {
       const pending = pendingAudioRef.current
       if (pending) {
         pendingAudioRef.current = null
-        playMp3Base64(pending)
+        playMp3Base64(pending.b64, pending.recvTs, true)
       }
     }
 
