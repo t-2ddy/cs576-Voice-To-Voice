@@ -9,7 +9,7 @@
 - TTS time drops by roughly one TCP + TLS handshake per turn after the first. **Broadened:** the capture shows OpenAI and Supabase also open a new connection every turn, so the expected saving is about 170 ms per turn across all three services.
 
 ## Setup
-- Date: 2026-11-17 · Commit before: `a90e3be` · Commit after: (uncommitted at time of the after-runs; fill in when committed)
+- Date: 2026-11-17 · Commit before: `a90e3be` · Commit after: `012fcab` (code was uncommitted during the after-runs but identical to this commit)
 - Prompt script: same as `00-baseline-e2e.md`
 - Before capture: `captures/N2-before.pcapng` (Wi-Fi + Npcap loopback, 3 turns, 93 s). Latency rows for those 3 turns: `data/N2-before-capture-2026-11-17.csv` (kept out of the N1 baseline).
 
