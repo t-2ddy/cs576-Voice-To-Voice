@@ -1,5 +1,7 @@
 # N6 · Security + multi-user
 
+> **Status: TBD.** Not in the presentation scope. See the priority table in `README.md`.
+
 ## Goal
 `wss://` through a reverse proxy, an auth token checked during the WS handshake, an `Origin` check against cross-site WebSocket hijacking, and per-user sessions (which also fixes the shared global memory).
 

@@ -47,6 +47,7 @@ COLUMNS = [
     "run",
     "turn",
     "memory_mode",
+    "mic_source",
     "user_chars",
     "reply_chars",
     "mp3_bytes",
@@ -57,6 +58,9 @@ COLUMNS = [
     "chunks",
     "first_chunk_bytes",
     "sentences",
+    "pcm_upstream_bytes",
+    "pcm_chunks",
+    "pcm_drop_chunks",
     "notes",
 ]
 
@@ -81,6 +85,7 @@ class TurnTimer:
         self.turn = turn
         self.marks: dict[str, float] = {}
         self.memory_mode = ""
+        self.mic_source = ""
         self.user_chars = 0
         self.reply_chars = 0
         self.mp3_bytes = 0
@@ -89,6 +94,9 @@ class TurnTimer:
         self.chunks: int | None = None
         self.first_chunk_bytes: int | None = None
         self.sentences = 0
+        self.pcm_upstream_bytes: int | None = None
+        self.pcm_chunks: int | None = None
+        self.pcm_drop_chunks: int | None = None
         self.notes: list[str] = []
 
     def mark(self, name: str, at: float | None = None) -> None:
@@ -147,6 +155,7 @@ class TurnTimer:
             "run": RUN_ID,
             "turn": self.turn,
             "memory_mode": self.memory_mode,
+            "mic_source": self.mic_source,
             "user_chars": self.user_chars,
             "reply_chars": self.reply_chars,
             "mp3_bytes": self.mp3_bytes,
@@ -156,6 +165,9 @@ class TurnTimer:
             "chunks": "" if self.chunks is None else self.chunks,
             "first_chunk_bytes": "" if self.first_chunk_bytes is None else self.first_chunk_bytes,
             "sentences": self.sentences or "",
+            "pcm_upstream_bytes": "" if self.pcm_upstream_bytes is None else self.pcm_upstream_bytes,
+            "pcm_chunks": "" if self.pcm_chunks is None else self.pcm_chunks,
+            "pcm_drop_chunks": "" if self.pcm_drop_chunks is None else self.pcm_drop_chunks,
             "notes": ";".join(self.notes),
         }
         with open(path, "a", newline="", encoding="utf-8") as f:

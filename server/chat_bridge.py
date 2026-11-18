@@ -10,6 +10,7 @@ Clients receive JSON events:
       -- streamed reply (N3): one binary frame per MP3 chunk follows, then
   {"type": "audio_end", "stream": id, "bytes": N, "chunks": k}
   {"type": "status", "value": "listening"|"thinking"|"speaking"|"ready"|"error", "detail"?: "..."}
+  {"type": "mic_config", "source": "local"|"browser", "chunk_ms": N}  -- N4; on connect
 Clients may send:
   {"type": "playback_started", "recv_ts": <ms>, "play_ts": <ms>, "blocked"?: true, "stream"?: id}
       -- the last `audio` clip (or first stream chunk) arrived at recv_ts and
@@ -17,11 +18,16 @@ Clients may send:
          it until a click)
   {"type": "playback_done", "stream"?: id}  -- the last clip/stream finished (or failed)
   While a stream is current, reports without its id are ignored.
+  {"type": "mic_start", "format": "pcm_s16le", "rate": 16000, "chunk_ms": N}  -- N4
+  raw binary PCM frames after mic_start (16 kHz mono int16 LE)
+  {"type": "mic_stop"}
 
 Env (server/.env), read when the bridge starts / sends audio:
+  CHAT_WS_HOST     (default 127.0.0.1; 0.0.0.0 for LAN stretch)
   WS_AUDIO_BINARY  (default 1; 0 = legacy base64-in-JSON audio)
   WS_COMPRESSION   (default 0; 1 = negotiate permessage-deflate. MP3 doesn't
                     compress, so deflate only pays off for base64 audio)
+  MIC_SOURCE / MIC_CHUNK_MS  (also set via configure_mic from voice_chat)
 """
 
 from __future__ import annotations
@@ -30,18 +36,24 @@ import asyncio
 import base64
 import json
 import os
+import queue
 import sys
 import threading
 import time
 from http import HTTPStatus
 from typing import Any
 
+import numpy as np
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request, Response
 
-CHAT_WS_HOST = "127.0.0.1"
+from speechToText import FRAME_BYTES, SAMPLE_RATE
+
+CHAT_WS_HOST = os.getenv("CHAT_WS_HOST", "127.0.0.1").strip() or "127.0.0.1"
 CHAT_WS_PORT = 8766
+# ~3 s of 30 ms frames; drop oldest on overflow (backpressure).
+MIC_QUEUE_MAX_FRAMES = 100
 
 _clients: set[ServerConnection] = set()
 _loop: asyncio.AbstractEventLoop | None = None
@@ -58,9 +70,91 @@ _last_status: dict[str, Any] | None = None
 _last_chat: dict[str, dict[str, Any]] = {}
 _warned_no_client: set[str] = set()
 
+_mic_source = "local"
+_mic_chunk_ms = 30
+_mic_queue: queue.Queue | None = None
+_mic_accept = False
+_mic_started = False
+_mic_buffer = bytearray()
+_mic_stats = {"pcm_upstream_bytes": 0, "pcm_chunks": 0, "pcm_drop_chunks": 0}
+
+
+def configure_mic(source: str, chunk_ms: int, frame_queue: queue.Queue | None) -> None:
+    """Wire MIC_SOURCE / chunk size and the shared browser frame queue (or None for local)."""
+    global _mic_source, _mic_chunk_ms, _mic_queue, _mic_started
+    with _lock:
+        _mic_source = (source or "local").strip().lower() or "local"
+        _mic_chunk_ms = max(1, int(chunk_ms))
+        _mic_queue = frame_queue
+        _mic_started = False
+        _mic_buffer.clear()
+
+
+def set_mic_accept(accept: bool) -> None:
+    """Allow (listening/calibrate) or drop (thinking/speaking) uplink PCM."""
+    global _mic_accept
+    with _lock:
+        _mic_accept = accept
+        if not accept:
+            _mic_buffer.clear()
+
+
+def reset_mic_stats() -> None:
+    with _lock:
+        _mic_stats["pcm_upstream_bytes"] = 0
+        _mic_stats["pcm_chunks"] = 0
+        _mic_stats["pcm_drop_chunks"] = 0
+
+
+def take_mic_stats() -> dict[str, int]:
+    with _lock:
+        return dict(_mic_stats)
+
+
+def mic_config_event() -> dict[str, Any]:
+    with _lock:
+        return {
+            "type": "mic_config",
+            "source": _mic_source,
+            "chunk_ms": _mic_chunk_ms,
+            "rate": SAMPLE_RATE,
+            "format": "pcm_s16le",
+        }
+
+
+def _ingest_mic_pcm(data: bytes) -> None:
+    """Reassemble client PCM into 30 ms int16 frames for the VAD queue."""
+    if not data:
+        return
+    with _lock:
+        if not _mic_started or not _mic_accept or _mic_queue is None:
+            return
+        _mic_stats["pcm_upstream_bytes"] += len(data)
+        _mic_stats["pcm_chunks"] += 1
+        _mic_buffer.extend(data)
+        q = _mic_queue
+        while len(_mic_buffer) >= FRAME_BYTES:
+            frame = np.frombuffer(bytes(_mic_buffer[:FRAME_BYTES]), dtype=np.int16).copy()
+            del _mic_buffer[:FRAME_BYTES]
+            try:
+                q.put_nowait(frame)
+            except queue.Full:
+                _mic_stats["pcm_drop_chunks"] += 1
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    q.put_nowait(frame)
+                except queue.Full:
+                    _mic_stats["pcm_drop_chunks"] += 1
+
 
 def _handle_client_message(raw: str | bytes) -> None:
-    global _playback_timing
+    global _playback_timing, _mic_started
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        _ingest_mic_pcm(bytes(raw))
+        return
     try:
         event = json.loads(raw)
     except (TypeError, ValueError):
@@ -68,6 +162,16 @@ def _handle_client_message(raw: str | bytes) -> None:
     if not isinstance(event, dict):
         return
     event_type = event.get("type")
+    if event_type == "mic_start":
+        with _lock:
+            _mic_started = True
+            _mic_buffer.clear()
+        return
+    if event_type == "mic_stop":
+        with _lock:
+            _mic_started = False
+            _mic_buffer.clear()
+        return
     with _lock:
         current = _current_stream
     if current is not None and event.get("stream") != current:
@@ -116,9 +220,14 @@ async def _replay_state(websocket: ServerConnection) -> None:
 
 
 async def _handler(websocket: ServerConnection) -> None:
+    global _mic_started
     _clients.add(websocket)
     _client_connected.set()
     print(f"(UI connected, {len(_clients)} client{'s' if len(_clients) != 1 else ''})", flush=True)
+    try:
+        await websocket.send(json.dumps(mic_config_event()))
+    except Exception:
+        pass
     await _replay_state(websocket)
     try:
         async for raw in websocket:
@@ -129,6 +238,9 @@ async def _handler(websocket: ServerConnection) -> None:
         _clients.discard(websocket)
         if not _clients:
             _client_connected.clear()
+            with _lock:
+                _mic_started = False
+                _mic_buffer.clear()
         print(
             f"(UI disconnected, {len(_clients)} client{'s' if len(_clients) != 1 else ''} left)",
             flush=True,

@@ -1,5 +1,7 @@
 # N7 · Resilience
 
+> **Status: TBD.** Not in the presentation scope. See the priority table in `README.md`.
+
 ## Goal
 Tuned heartbeats, session resume with message sequence numbers, and jittered-backoff retries on API errors / HTTP 429.
 

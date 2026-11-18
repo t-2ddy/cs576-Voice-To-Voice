@@ -3,6 +3,7 @@
 Env (server/.env):
   OPENAI_API_KEY
   STT_MODEL  (optional, default gpt-4o-mini-transcribe; whisper-1 also works)
+  MIC_SOURCE  (optional, local|browser; default local — browser frames come from chat_bridge)
   VAD_THRESHOLD_MULTIPLIER, VAD_MIN_THRESHOLD, VAD_START_FRAMES,
   VAD_SILENCE_END_MS, VAD_MIN_UTTERANCE_SECONDS, VAD_DEBUG  (optional tuning)
 """
@@ -35,6 +36,7 @@ def _env_float(name: str, default: float) -> float:
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000
+FRAME_BYTES = FRAME_SAMPLES * 2  # int16 LE
 
 CALIBRATION_SECONDS = 1.0
 SPEECH_THRESHOLD_MULTIPLIER = _env_float("VAD_THRESHOLD_MULTIPLIER", 3.0)
@@ -198,18 +200,31 @@ def transcribe(audio_int16: np.ndarray) -> str | None:
 
 
 class SpeechToText:
-    """Owns the mic InputStream and frame queue/callback."""
+    """VAD + STT over a frame queue; local mode also owns a PortAudio InputStream."""
 
-    def __init__(self) -> None:
-        self._frame_queue: queue.Queue = queue.Queue()
+    def __init__(
+        self,
+        source: str = "local",
+        frame_queue: queue.Queue | None = None,
+    ) -> None:
+        self._source = (source or "local").strip().lower()
+        if self._source not in ("local", "browser"):
+            raise ValueError(f"MIC_SOURCE must be local or browser, got {source!r}")
         get_openai_client()  # fail fast if OPENAI_API_KEY is missing
-        self._stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="int16",
-            blocksize=FRAME_SAMPLES,
-            callback=self._audio_callback,
-        )
+        self._stream: sd.InputStream | None = None
+        if self._source == "browser":
+            if frame_queue is None:
+                raise ValueError("browser mic requires a shared frame_queue from chat_bridge")
+            self._frame_queue = frame_queue
+        else:
+            self._frame_queue = frame_queue if frame_queue is not None else queue.Queue()
+            self._stream = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="int16",
+                blocksize=FRAME_SAMPLES,
+                callback=self._audio_callback,
+            )
         self._threshold = 0.0
 
     def _audio_callback(self, indata, _frames, _time_info, status) -> None:
@@ -218,14 +233,18 @@ class SpeechToText:
         self._frame_queue.put(indata[:, 0].copy())
 
     def __enter__(self) -> "SpeechToText":
-        self._stream.start()
+        if self._stream is not None:
+            self._stream.start()
+        else:
+            print("Waiting for browser mic PCM (stay quiet for calibration)...")
         self._threshold = calibrate_noise_floor(self._frame_queue)
         print("Listening... (Ctrl+C to quit)")
         return self
 
     def __exit__(self, *exc_info) -> None:
-        self._stream.stop()
-        self._stream.close()
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
 
     def flush(self) -> None:
         """Drop queued mic frames (e.g. the character's own voice picked up during playback)."""

@@ -1,5 +1,7 @@
 # N8 · Protocol comparison (stretch)
 
+> **Status: TBD.** Not in the presentation scope. See the priority table in `README.md`.
+
 ## Goal
 Compare our WebSocket/TCP audio path with WebRTC (UDP + Opus), e.g. OpenAI Realtime over WebRTC as a baseline.
 

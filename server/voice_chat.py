@@ -29,6 +29,9 @@ import time
 from collections.abc import Iterator
 
 from chat_bridge import (
+    CHAT_WS_HOST,
+    CHAT_WS_PORT,
+    configure_mic,
     emit_audio,
     emit_audio_chunk,
     emit_audio_end,
@@ -36,7 +39,10 @@ from chat_bridge import (
     emit_chat,
     emit_status,
     get_playback_timing,
+    reset_mic_stats,
+    set_mic_accept,
     start_chat_bridge,
+    take_mic_stats,
     wait_for_client,
     wait_for_playback,
 )
@@ -73,6 +79,10 @@ def _env_flag(name: str, default: bool) -> bool:
 TTS_STREAMING = _env_flag("TTS_STREAMING", True)
 # N3b: stream the reply text and synthesize it sentence by sentence (needs TTS_STREAMING).
 LLM_STREAMING = _env_flag("LLM_STREAMING", True) and TTS_STREAMING
+# N4: local PortAudio mic (default) or browser PCM over the WebSocket.
+MIC_SOURCE = (os.getenv("MIC_SOURCE", "local").strip().lower() or "local")
+MIC_CHUNK_MS = int(os.getenv("MIC_CHUNK_MS", "30") or 30)
+MIC_QUEUE_MAX_FRAMES = 100
 
 
 def _wait_for_ui() -> None:
@@ -195,12 +205,22 @@ def _stream_speech(sentences: Iterator[str], timer: TurnTimer, show_text: bool) 
 
 
 def main() -> None:
+    if MIC_SOURCE not in ("local", "browser"):
+        print(f"Error: MIC_SOURCE must be local or browser, got {MIC_SOURCE!r}", file=sys.stderr)
+        sys.exit(1)
+
+    mic_queue: queue.Queue | None = None
+    if MIC_SOURCE == "browser":
+        mic_queue = queue.Queue(maxsize=MIC_QUEUE_MAX_FRAMES)
+    configure_mic(MIC_SOURCE, MIC_CHUNK_MS, mic_queue)
+
     try:
         start_chat_bridge()
     except RuntimeError as exc:
         print(f"Error: {exc} (is another voice_chat.py already running?)", file=sys.stderr)
         sys.exit(1)
-    print("Chat UI bridge listening on ws://127.0.0.1:8766")
+    print(f"Chat UI bridge listening on ws://{CHAT_WS_HOST}:{CHAT_WS_PORT}")
+    print(f"Mic source: {MIC_SOURCE}" + (f" (chunk {MIC_CHUNK_MS} ms)" if MIC_SOURCE == "browser" else ""))
     try:
         _wait_for_ui()
     except KeyboardInterrupt:
@@ -232,17 +252,36 @@ def main() -> None:
     assistant_turns = 0
     turn_number = 0
 
-    with SpeechToText() as stt:
+    # Browser mic needs PCM during calibration; tell the UI to stream now.
+    if MIC_SOURCE == "browser":
+        emit_status("listening")
+        set_mic_accept(True)
+        reset_mic_stats()
+
+    with SpeechToText(source=MIC_SOURCE, frame_queue=mic_queue) as stt:
         try:
             while True:
                 emit_status("listening")
+                set_mic_accept(True)
+                reset_mic_stats()
                 timer = TurnTimer(turn_number + 1)
+                timer.mic_source = MIC_SOURCE
                 try:
                     text = stt.listen_for_utterance(timer)
                 except Exception as exc:
                     print(f"(speech-to-text request failed: {exc})", file=sys.stderr)
                     emit_status("error", f"STT failed: {exc}")
+                    set_mic_accept(False)
                     continue
+                set_mic_accept(False)
+                stt.flush()
+                if MIC_SOURCE == "browser":
+                    stats = take_mic_stats()
+                    timer.pcm_upstream_bytes = stats["pcm_upstream_bytes"]
+                    timer.pcm_chunks = stats["pcm_chunks"]
+                    timer.pcm_drop_chunks = stats["pcm_drop_chunks"]
+                    if stats["pcm_drop_chunks"]:
+                        timer.note("mic_backpressure")
                 if not text:
                     continue
                 turn_number += 1

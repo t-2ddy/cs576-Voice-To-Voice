@@ -220,3 +220,6 @@ __marimo__/
 # Wireshark captures (plaintext WS / mic audio)
 findings/captures/*.pcapng
 findings/captures/*.pcap
+
+# Latency / metrics CSV logs
+*.csv

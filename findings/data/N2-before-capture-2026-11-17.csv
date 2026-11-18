@@ -1,4 +1,0 @@
-run,turn,memory_mode,user_chars,reply_chars,mp3_bytes,vad_tail_ms,stt_ms,memory_ms,llm_ms,tts_ms,ws_delivery_ms,playback_start_ms,total_ms,notes
-2026-11-17T17:07:37,1,light,35,26,24702,1200,1351,346,1000,392,5,2,4297,
-2026-11-17T17:07:37,2,light,39,122,113310,1200,815,139,1080,544,4,1,3783,
-2026-11-17T17:07:37,3,full,60,97,94083,1200,928,390,1175,422,5,3,4123,
